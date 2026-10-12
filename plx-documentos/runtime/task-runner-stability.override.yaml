@@ -1,0 +1,6 @@
+services:
+  task-runners:
+    environment:
+      # O fluxo documental alterna Code nodes com chamadas longas de OCR/IA.
+      # Manter o runner vivo evita a corrida de relançamento entre essas etapas.
+      N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT: '0'

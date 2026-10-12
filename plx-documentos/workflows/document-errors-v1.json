@@ -1,0 +1,201 @@
+{
+  "id": "documentErrorsV1",
+  "name": "DOCUMENTOS · 04 · Registrar erros",
+  "description": "Registra falhas técnicas dos workflows de documentos em tabela local para diagnóstico e rastreabilidade.",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 300,
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "availableInMCP": true
+  },
+  "nodes": [
+    {
+      "id": "trigger",
+      "name": "Capturar falha de workflow",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        260
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "normalize",
+      "name": "Normalizar evidência da falha",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        260
+      ],
+      "parameters": {
+        "jsCode": "const event = $input.first().json;\nconst execution = event.execution ?? {};\nconst workflow = event.workflow ?? {};\nconst error = execution.error ?? event.error ?? {};\nreturn [{ json: {\n  execution_id: String(execution.id ?? ''), workflow_name: String(workflow.name ?? ''),\n  node_name: String(execution.lastNodeExecuted ?? error.node?.name ?? ''), error_message: String(error.message ?? 'UNKNOWN_ERROR'),\n  occurred_at: new Date().toISOString(), document_key: String(event.document_key ?? ''),\n  raw_context: JSON.stringify({ mode: execution.mode, retryOf: execution.retryOf, stack: String(error.stack ?? '').slice(0, 4000) })\n} }];"
+      }
+    },
+    {
+      "id": "insert",
+      "name": "Registrar erro local",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        520,
+        260
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "documentos_contabeis_erros"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "execution_id": "={{ $json.execution_id ?? '' }}",
+            "workflow_name": "={{ $json.workflow_name ?? '' }}",
+            "node_name": "={{ $json.node_name ?? '' }}",
+            "error_message": "={{ $json.error_message ?? '' }}",
+            "occurred_at": "={{ $json.occurred_at ?? '' }}",
+            "document_key": "={{ $json.document_key ?? '' }}",
+            "raw_context": "={{ $json.raw_context ?? '' }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "execution_id",
+              "displayName": "execution_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "workflow_name",
+              "displayName": "workflow_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "node_name",
+              "displayName": "node_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "error_message",
+              "displayName": "error_message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "occurred_at",
+              "displayName": "occurred_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "date",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "document_key",
+              "displayName": "document_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "raw_context",
+              "displayName": "raw_context",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "done",
+      "name": "Erro registrado",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        780,
+        260
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "note-error",
+      "name": "Tratamento de falhas",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -60
+      ],
+      "parameters": {
+        "content": "## 04 · Erros\nRegistra execução, workflow, nó e mensagem. Nenhuma informação é enviada para canais externos.",
+        "width": 720,
+        "height": 190,
+        "color": 5
+      }
+    }
+  ],
+  "connections": {
+    "Capturar falha de workflow": {
+      "main": [
+        [
+          {
+            "node": "Normalizar evidência da falha",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalizar evidência da falha": {
+      "main": [
+        [
+          {
+            "node": "Registrar erro local",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registrar erro local": {
+      "main": [
+        [
+          {
+            "node": "Erro registrado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "tags": []
+}

@@ -1,0 +1,131 @@
+{
+  "artifact": "proposed_configuration_example_not_runtime_schema",
+  "schema_version": "2-proposed",
+  "active": false,
+  "tenant_id": "TO_CONFIGURE",
+  "operation_id": "TO_CONFIGURE",
+  "session_id": "TO_CONFIGURE",
+  "group_id": "TO_CONFIGURE",
+  "policy_version": 1,
+  "group_mode": "single_company",
+  "timezone": "America/Sao_Paulo",
+  "allowed_archive_owners": [
+    {
+      "owner_id": "TO_CONFIGURE",
+      "legal_name": "TO_CONFIGURE",
+      "tax_identifier": {
+        "type": "CNPJ",
+        "value": null
+      },
+      "approved_aliases": [],
+      "permitted_establishments": [],
+      "drive_root_id": "TO_CONFIGURE",
+      "archive_mode": "mixed"
+    }
+  ],
+  "review": {
+    "restricted_root_id": "TO_CONFIGURE",
+    "responsible_id": "TO_CONFIGURE",
+    "sla_hours": null,
+    "foreign_document_action": "restricted_review",
+    "public_message": "minimal_protocol_only"
+  },
+  "archive": {
+    "folder_levels": [
+      "owner",
+      "year",
+      "department",
+      "month",
+      "day"
+    ],
+    "type_in_filename": true,
+    "missing_date": "received_date_with_warning",
+    "policy_dates_by_type": "MUST_CONFIGURE",
+    "preserve_original": true
+  },
+  "limits": {
+    "max_bytes": null,
+    "max_pages": null,
+    "max_expanded_bytes": null,
+    "max_ai_attempts": null,
+    "max_ai_cost_per_document": null,
+    "global_concurrency": null,
+    "tenant_concurrency": null
+  },
+  "notification": {
+    "require_archive_verification": true,
+    "use_outbox": true,
+    "ambiguous_delivery": "UNKNOWN",
+    "daily_close_local": "18:00",
+    "include_financial_values": false
+  },
+  "activation_requirements": [
+    "all_placeholders_resolved",
+    "valid_identifiers_or_explicit_approved_relationship",
+    "unique_channel_mapping",
+    "authorized_drive_roots",
+    "date_rules_by_document_type",
+    "limits_defined_and_load_tested",
+    "responsible_and_sla_set",
+    "P0_tests_approved",
+    "office_acceptance"
+  ],
+  "required_event_fields": [
+    "tenant_id",
+    "operation_id",
+    "session_id",
+    "group_id",
+    "message_id",
+    "received_at_utc",
+    "received_at_local",
+    "policy_version",
+    "source_file_id",
+    "sha256"
+  ],
+  "required_document_fields": [
+    "document_id",
+    "parent_document_id",
+    "source_pages",
+    "parties_with_roles_and_evidence",
+    "archive_owner_id",
+    "archive_direction",
+    "document_type",
+    "department",
+    "dates_with_sources",
+    "review_reasons",
+    "classification_version"
+  ],
+  "required_archive_fields": [
+    "document_id",
+    "revision",
+    "drive_file_id",
+    "parent_id",
+    "verified_at",
+    "integrity_evidence"
+  ],
+  "uniqueness_proposed": {
+    "occurrence": [
+      "tenant_id",
+      "session_id",
+      "group_id",
+      "message_id"
+    ],
+    "content": [
+      "tenant_id",
+      "archive_owner_id",
+      "sha256"
+    ],
+    "folder": [
+      "tenant_id",
+      "parent_id",
+      "segment_key"
+    ],
+    "notification": [
+      "tenant_id",
+      "occurrence_id",
+      "kind",
+      "revision"
+    ]
+  },
+  "note": "Before identity resolution, dedup only within authorized ingress scope. Do not use unresolved owner to share content between companies."
+}

@@ -1,0 +1,10 @@
+services:
+  n8n:
+    environment:
+      NODE_USE_ENV_PROXY: "1"
+      N8N_RUNNERS_TASK_REQUEST_TIMEOUT: "180"
+      N8N_RUNNERS_TASK_TIMEOUT: "300"
+      N8N_RUNNERS_GRANT_TOKEN_TTL: "300"
+      HTTP_PROXY: http://host.docker.internal:18888
+      HTTPS_PROXY: http://host.docker.internal:18888
+      NO_PROXY: localhost,127.0.0.1,waha,document-ai-gateway,sandbox-api,searxng

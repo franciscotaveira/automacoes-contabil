@@ -1,0 +1,278 @@
+{
+  "id": "documentBootstrapV1",
+  "name": "DOCUMENTOS · 00 · Preparar estrutura",
+  "description": "Cria ou reutiliza as tabelas internas de manifesto e erros. Execute apenas na preparação do ambiente.",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 300,
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "availableInMCP": true
+  },
+  "nodes": [
+    {
+      "id": "manual",
+      "name": "Executar preparação",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        260
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "local-webhook",
+      "name": "Preparar pela instância local",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        420
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "documentos-bootstrap-v1-7c8b",
+        "authentication": "none",
+        "responseMode": "onReceived",
+        "options": {}
+      }
+    },
+    {
+      "id": "manifest-table",
+      "name": "Criar tabela de documentos",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        260,
+        260
+      ],
+      "parameters": {
+        "resource": "table",
+        "operation": "create",
+        "tableName": "documentos_contabeis_manifesto",
+        "columns": {
+          "column": [
+            {
+              "name": "idempotency_key",
+              "type": "string"
+            },
+            {
+              "name": "message_id",
+              "type": "string"
+            },
+            {
+              "name": "group_id",
+              "type": "string"
+            },
+            {
+              "name": "sender_id",
+              "type": "string"
+            },
+            {
+              "name": "received_at",
+              "type": "date"
+            },
+            {
+              "name": "document_type",
+              "type": "string"
+            },
+            {
+              "name": "mime_type",
+              "type": "string"
+            },
+            {
+              "name": "original_filename",
+              "type": "string"
+            },
+            {
+              "name": "sha256",
+              "type": "string"
+            },
+            {
+              "name": "drive_file_id",
+              "type": "string"
+            },
+            {
+              "name": "drive_web_url",
+              "type": "string"
+            },
+            {
+              "name": "status",
+              "type": "string"
+            },
+            {
+              "name": "review_required",
+              "type": "boolean"
+            },
+            {
+              "name": "review_reason",
+              "type": "string"
+            },
+            {
+              "name": "provider",
+              "type": "string"
+            },
+            {
+              "name": "model",
+              "type": "string"
+            },
+            {
+              "name": "provider_request_id",
+              "type": "string"
+            },
+            {
+              "name": "processing_ms",
+              "type": "number"
+            },
+            {
+              "name": "estimated_cost",
+              "type": "number"
+            },
+            {
+              "name": "extracted_json",
+              "type": "string"
+            },
+            {
+              "name": "created_at",
+              "type": "date"
+            },
+            {
+              "name": "updated_at",
+              "type": "date"
+            }
+          ]
+        },
+        "options": {
+          "createIfNotExists": true
+        }
+      }
+    },
+    {
+      "id": "errors-table",
+      "name": "Criar tabela de erros",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        520,
+        260
+      ],
+      "parameters": {
+        "resource": "table",
+        "operation": "create",
+        "tableName": "documentos_contabeis_erros",
+        "columns": {
+          "column": [
+            {
+              "name": "execution_id",
+              "type": "string"
+            },
+            {
+              "name": "workflow_name",
+              "type": "string"
+            },
+            {
+              "name": "node_name",
+              "type": "string"
+            },
+            {
+              "name": "error_message",
+              "type": "string"
+            },
+            {
+              "name": "occurred_at",
+              "type": "date"
+            },
+            {
+              "name": "document_key",
+              "type": "string"
+            },
+            {
+              "name": "raw_context",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {
+          "createIfNotExists": true
+        }
+      }
+    },
+    {
+      "id": "done",
+      "name": "Estrutura preparada",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        780,
+        260
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "note",
+      "name": "Como usar",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -20,
+        -80
+      ],
+      "parameters": {
+        "content": "## 00 · Preparação\nExecute uma vez. Cria as Data Tables internas usadas para deduplicação, manifesto e erros. A operação é idempotente: tabelas existentes são reutilizadas.",
+        "width": 1020,
+        "height": 220,
+        "color": 5
+      }
+    }
+  ],
+  "connections": {
+    "Executar preparação": {
+      "main": [
+        [
+          {
+            "node": "Criar tabela de documentos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar pela instância local": {
+      "main": [
+        [
+          {
+            "node": "Criar tabela de documentos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Criar tabela de documentos": {
+      "main": [
+        [
+          {
+            "node": "Criar tabela de erros",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Criar tabela de erros": {
+      "main": [
+        [
+          {
+            "node": "Estrutura preparada",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "tags": []
+}

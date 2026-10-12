@@ -1,0 +1,340 @@
+[
+  {
+    "id": "plxDailyCloseV35Draft",
+    "name": "PLX LAB · Fechamento diário V3.5 · Candidato",
+    "description": "Candidato isolado para fechar às 18h os documentos organizados no dia pela V3.5. Resume categorias, departamentos e atenções; não calcula valores. Envio WAHA permanece desabilitado até o cutover controlado.",
+    "active": false,
+    "isArchived": false,
+    "nodes": [
+      {
+        "id": "schedule",
+        "name": "Fechar dia às 18h",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          0,
+          180
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "cronExpression",
+                "expression": "0 18 * * *"
+              }
+            ]
+          },
+          "misfirePolicy": "coalesce_owner",
+          "misfireGraceSeconds": 7200
+        }
+      },
+      {
+        "id": "manual",
+        "name": "Executar fechamento agora",
+        "type": "n8n-nodes-base.manualTrigger",
+        "typeVersion": 1,
+        "position": [
+          0,
+          360
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "read",
+        "name": "Ler manifesto",
+        "type": "n8n-nodes-base.dataTable",
+        "typeVersion": 1.1,
+        "position": [
+          300,
+          260
+        ],
+        "parameters": {
+          "resource": "row",
+          "operation": "get",
+          "dataTableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "{{N8N_DATA_TABLE_ID}}",
+            "cachedResultName": "plx_v3_documentos"
+          },
+          "matchType": "allConditions",
+          "filters": {
+            "conditions": []
+          },
+          "returnAll": true,
+          "orderBy": false
+        }
+      },
+      {
+        "id": "summary",
+        "name": "Consolidar documentos do dia",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          560,
+          260
+        ],
+        "parameters": {
+          "jsCode": "const labels = {\n  MODEL_OUTPUT_INVALID_JSON: 'a leitura da IA não retornou dados válidos',\n  DOCUMENT_EXTRACTION_EMPTY: 'não foi possível ler o conteúdo do arquivo',\n  OCR_LOW_CONFIDENCE: 'a imagem está pouco legível',\n  LOW_CONFIDENCE: 'a classificação precisa de conferência',\n  REFERENCE_DATE_FALLBACK_TO_RECEIVED: 'data do documento não identificada; foi usada a data de recebimento para arquivar',\n  MISSING_REFERENCE_DATE: 'data do documento não identificada',\n  UNKNOWN_DOCUMENT_TYPE: 'tipo do documento não identificado',\n  FISCAL_ACCESS_KEY_INVALID: 'chave de acesso fiscal ausente ou inválida',\n  ISSUER_NOT_EVIDENCED: 'emitente/beneficiário não identificado',\n  RECIPIENT_NOT_EVIDENCED: 'destinatário/pagador não identificado',\n  PAYMENT_DUE_DATE_NOT_EVIDENCED: 'data de vencimento não identificada',\n  PAYMENT_AMOUNT_NOT_EVIDENCED: 'valor do documento de pagamento não identificado',\n  PAYMENT_BENEFICIARY_NOT_EVIDENCED: 'beneficiário não identificado',\n  PAYMENT_CODE_NOT_EVIDENCED: 'linha digitável ou código de barras não identificado'\n};\nconst rows = $input.all().map((item) => item.json);\nconst groupId = '{{WHATSAPP_GROUP_ID}}@g.us';\nconst fmtDate = (value) => new Intl.DateTimeFormat('en-CA', {\n  timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit'\n}).format(new Date(value));\nconst day = fmtDate(new Date());\nconst operationDate = (row) => row.organized_at || row.finished_at || row.updated_at || row.received_at || '';\nconst unique = new Map();\nfor (const row of rows) {\n  const key = String(row.idempotency_key || row.drive_file_id || row.benchmark_id || '').trim();\n  if (key && !unique.has(key)) unique.set(key, row);\n}\nconst today = [...unique.values()].filter((row) => {\n  if (!['ORGANIZED', 'ORGANIZED_ATTENTION'].includes(String(row.status || '').toUpperCase())) return false;\n  if (row.group_id && row.group_id !== groupId) return false;\n  const value = operationDate(row);\n  return value && fmtDate(value) === day;\n});\nconst typeLabels = {\n  'nf-e':'NF-e','nfs-e':'NFS-e','nfc-e':'NFC-e','cupom-fiscal':'Cupom fiscal','ct-e':'CT-e','mdf-e':'MDF-e',\n  extrato:'Extrato',comprovante:'Comprovante',recibo:'Recibo',boleto:'Boleto',fatura:'Fatura',balancete:'Balancete',\n  razao:'Razão',diario:'Diário',dre:'DRE',folha:'Folha',holerite:'Holerite',fgts:'FGTS',inss:'INSS',guia:'Guia',outro:'Outro'\n};\nconst departmentLabels = { fiscal:'Fiscal', financeiro:'Financeiro', contabil:'Contábil', pessoal:'Pessoal', revisar:'Revisar' };\nconst countBy = (key, labelsMap) => today.reduce((acc, row) => {\n  const raw = String(row[key] || (key === 'document_type' ? 'outro' : 'revisar')).toLowerCase();\n  const label = labelsMap[raw] || raw;\n  acc[label] = (acc[label] || 0) + 1;\n  return acc;\n}, {});\nconst byType = countBy('document_type', typeLabels);\nconst byDepartment = countBy('department', departmentLabels);\nconst pending = today.filter((row) => Boolean(row.review_required) || String(row.status).toUpperCase() === 'ORGANIZED_ATTENTION');\nconst lines = (record) => Object.entries(record).sort((a,b) => b[1] - a[1] || a[0].localeCompare(b[0], 'pt-BR')).map(([name,count]) => '• ' + name + ': ' + count).join('\\n');\nconst observations = pending.slice(0, 20).map((row) => {\n  const reasons = String(row.review_reason || '').split('|').filter(Boolean).map((reason) => labels[reason] || reason);\n  const name = row.organized_filename || row.final_filename || row.original_filename || 'arquivo sem nome';\n  return '• ' + name + ': ' + (reasons.join('; ') || 'conferência humana solicitada');\n}).join('\\n');\nconst report = [\n  '📋 Fechamento diário da triagem — ' + day.split('-').reverse().join('/'),\n  '',\n  '• Documentos armazenados: ' + today.length,\n  '• Sem pendência: ' + (today.length - pending.length),\n  '• Precisam de atenção: ' + pending.length,\n  '',\n  today.length ? 'Categorias:\\n' + lines(byType) : 'Nenhum documento foi organizado hoje.',\n  today.length ? '\\nDepartamentos:\\n' + lines(byDepartment) : '',\n  observations ? '\\nObservações:\\n' + observations : '\\nObservações: nenhuma pendência registrada.',\n  pending.length > 20 ? '• Há mais ' + (pending.length - 20) + ' pendência(s) no manifesto.' : '',\n  '',\n  'Arquivos permanecem no Drive e prontos para lançamento no sistema contábil.'\n].filter(Boolean).join('\\n');\nconst base = {\n  report_date: day,\n  total_day: today.length,\n  pending_count: pending.length,\n  group_id: groupId,\n  summary_text: report,\n  generated_at: new Date().toISOString()\n};\nif (!today.length) return [{ json: { ...base, status: 'NO_DOCUMENTS', review_required: false } }];\nreturn today.map((row) => ({ json: {\n  ...base,\n  status: 'CLOSED',\n  received_at: row.received_at || '',\n  organized_at: row.organized_at || '',\n  reference_date: row.reference_date || '',\n  document_type: row.document_type || '',\n  department: row.department || '',\n  issuer_name: row.issuer_name || '',\n  recipient_name: row.recipient_name || '',\n  organized_filename: row.organized_filename || row.final_filename || row.original_filename || '',\n  organized_path: row.organized_path || row.drive_path || '',\n  drive_url: row.drive_web_url || '',\n  review_required: Boolean(row.review_required),\n  review_reason: row.review_reason || '',\n  processing_status: row.status\n} }));",
+          "mode": "runOnceForAllItems",
+          "language": "javaScript"
+        }
+      },
+      {
+        "id": "csv",
+        "name": "Gerar CSV diário",
+        "type": "n8n-nodes-base.convertToFile",
+        "typeVersion": 1.1,
+        "position": [
+          820,
+          260
+        ],
+        "parameters": {
+          "operation": "csv",
+          "binaryPropertyName": "data",
+          "options": {
+            "delimiter": ";",
+            "headerRow": true,
+            "fileName": "={{ 'fechamento-documentos-' + $json.report_date + '.csv' }}"
+          }
+        }
+      },
+      {
+        "id": "drive",
+        "name": "Arquivar fechamento no Drive",
+        "type": "n8n-nodes-base.googleDrive",
+        "typeVersion": 3,
+        "position": [
+          1080,
+          260
+        ],
+        "parameters": {
+          "authentication": "oAuth2",
+          "resource": "file",
+          "operation": "upload",
+          "inputDataFieldName": "data",
+          "name": "",
+          "driveId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "My Drive",
+            "cachedResultName": "My Drive"
+          },
+          "folderId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "{{GOOGLE_DRIVE_INBOX_FOLDER_ID}}",
+            "cachedResultName": "PLX - LAB NOVA ARQUITETURA - 2026-10-02"
+          },
+          "options": {
+            "simplifyOutput": false
+          }
+        },
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 5000,
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "x28epy954tCGyrFD",
+            "name": "Google Drive account"
+          }
+        }
+      },
+      {
+        "id": "done",
+        "name": "Fechamento arquivado",
+        "type": "n8n-nodes-base.noOp",
+        "typeVersion": 1,
+        "position": [
+          1820,
+          220
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "note-daily",
+        "name": "Fechamento diário",
+        "type": "n8n-nodes-base.stickyNote",
+        "typeVersion": 1,
+        "position": [
+          0,
+          -80
+        ],
+        "parameters": {
+          "content": "## Fechamento V3.5 às 18h\nConta documentos efetivamente organizados no dia, mesmo quando a data do documento é antiga. Resume categorias, departamentos e atenções; não calcula valores. O envio WAHA fica desabilitado até o cutover.",
+          "width": 900,
+          "height": 250,
+          "color": 5
+        }
+      },
+      {
+        "id": "prepare-final-message",
+        "name": "Preparar mensagem final",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1340,
+          220
+        ],
+        "parameters": {
+          "mode": "runOnceForAllItems",
+          "language": "javaScript",
+          "jsCode": "const summary = $('Consolidar documentos do dia').first().json;\nreturn [{ json: { group_id: summary.group_id, summary_text: summary.summary_text } }];"
+        },
+        "executeOnce": true
+      },
+      {
+        "id": "send-final-message",
+        "name": "Enviar fechamento ao grupo",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.5,
+        "position": [
+          1580,
+          220
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://waha:3000/api/sendText",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendBody": true,
+          "contentType": "raw",
+          "rawContentType": "application/json",
+          "body": "={{ JSON.stringify({ session: 'contabilidade-lab', chatId: $json.group_id, text: $json.summary_text }) }}",
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "wahaApiHeaderV1",
+            "name": "WAHA local · API"
+          }
+        },
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 3000,
+        "executeOnce": true,
+        "disabled": true,
+        "notes": "Habilitar somente no cutover, depois de desativar o fechamento antigo e validar o grupo configurado."
+      }
+    ],
+    "connections": {
+      "Executar fechamento agora": {
+        "main": [
+          [
+            {
+              "node": "Ler manifesto",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Ler manifesto": {
+        "main": [
+          [
+            {
+              "node": "Consolidar documentos do dia",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Consolidar documentos do dia": {
+        "main": [
+          [
+            {
+              "node": "Gerar CSV diário",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Gerar CSV diário": {
+        "main": [
+          [
+            {
+              "node": "Arquivar fechamento no Drive",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fechar dia às 18h": {
+        "main": [
+          [
+            {
+              "node": "Ler manifesto",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Arquivar fechamento no Drive": {
+        "main": [
+          [
+            {
+              "node": "Preparar mensagem final",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Preparar mensagem final": {
+        "main": [
+          [
+            {
+              "node": "Enviar fechamento ao grupo",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Enviar fechamento ao grupo": {
+        "main": [
+          [
+            {
+              "node": "Fechamento arquivado",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "executionTimeout": 300,
+      "saveDataSuccessExecution": "all",
+      "saveDataErrorExecution": "all",
+      "timezone": "America/Sao_Paulo",
+      "errorWorkflow": "documentErrorsV1",
+      "availableInMCP": true
+    },
+    "staticData": {
+      "node:Fechar dia às 18h": {
+        "recurrenceRules": [
+          null
+        ],
+        "recurrenceRuleSignatures": [
+          null
+        ]
+      }
+    },
+    "meta": {
+      "aiBuilderAssisted": true,
+      "builderVariant": "mcp"
+    },
+    "nodeGroups": [],
+    "pinData": {},
+    "sourceWorkflowId": null,
+    "tags": []
+  }
+]

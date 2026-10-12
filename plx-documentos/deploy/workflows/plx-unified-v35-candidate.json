@@ -1,0 +1,2858 @@
+[
+  {
+    "id": "plxUnifiedV35Draft",
+    "name": "PLX LAB · Processo documental unificado V3.5 · Candidato",
+    "description": "Candidato único: captura WAHA, original no Drive, fila durável, triagem NVIDIA, organização, confirmação e fechamento diário. Permanece inativo até o cutover controlado.",
+    "active": false,
+    "isArchived": false,
+    "nodes": [
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "plx-v35-process-queue",
+          "authentication": "headerAuth",
+          "responseMode": "responseNode",
+          "options": {}
+        },
+        "id": "a325a907-287d-4c17-99f9-1ab56060fa34",
+        "name": "Receber documento de benchmark",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2.1,
+        "position": [
+          0,
+          96
+        ],
+        "webhookId": "13448caf-0fea-4f1c-b400-99bdea48aa98",
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "labInternalHeaderV1",
+            "name": "Laboratório · credencial interna"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "const digitsOnly = (value) => String(value ?? '').replace(/\\D/g, '');\n\nconst isValidCnpj = (value) => {\n  const cnpj = digitsOnly(value);\n  if (cnpj.length !== 14 || /^(\\d)\\1{13}$/.test(cnpj)) return false;\n  const calculate = (length) => {\n    let sum = 0;\n    let weight = length - 7;\n    for (let index = 0; index < length; index += 1) {\n      sum += Number(cnpj[index]) * weight;\n      weight -= 1;\n      if (weight === 1) weight = 9;\n    }\n    const remainder = sum % 11;\n    return remainder < 2 ? 0 : 11 - remainder;\n  };\n  return calculate(12) === Number(cnpj[12]) && calculate(13) === Number(cnpj[13]);\n};\n\nconst inspectAccessKey = (value) => {\n  const key = digitsOnly(value);\n  const modelMap = { '55': 'nf-e', '65': 'nfc-e', '57': 'ct-e', '58': 'mdf-e' };\n  if (key.length !== 44) return { valid: false, key, model: '', document_type: '', issuer_cnpj: '', reason: 'ACCESS_KEY_LENGTH_INVALID' };\n  const model = key.slice(20, 22);\n  if (!modelMap[model]) return { valid: false, key, model, document_type: '', issuer_cnpj: key.slice(6, 20), reason: 'ACCESS_KEY_MODEL_UNSUPPORTED' };\n  let sum = 0;\n  let weight = 2;\n  for (let index = 42; index >= 0; index -= 1) {\n    sum += Number(key[index]) * weight;\n    weight = weight === 9 ? 2 : weight + 1;\n  }\n  const remainder = sum % 11;\n  const expected = remainder === 0 || remainder === 1 ? 0 : 11 - remainder;\n  if (expected !== Number(key[43])) return { valid: false, key, model, document_type: modelMap[model], issuer_cnpj: key.slice(6, 20), reason: 'ACCESS_KEY_CHECKSUM_INVALID' };\n  return { valid: true, key, model, document_type: modelMap[model], issuer_cnpj: key.slice(6, 20), reason: '' };\n};\n\nconst normalizeReferenceDate = (value) => {\n  const raw = String(value ?? '').trim();\n  let year = 0;\n  let month = 0;\n  let day = 0;\n  let normalized = '';\n  let match = raw.match(/^(\\d{4})-(\\d{2})-(\\d{2})$/);\n  if (match) {\n    year = Number(match[1]); month = Number(match[2]); day = Number(match[3]);\n    normalized = match[1] + '-' + match[2] + '-' + match[3];\n  } else {\n    match = raw.match(/^(\\d{2})\\/(\\d{2})\\/(\\d{4})$/);\n    if (!match) return '';\n    year = Number(match[3]); month = Number(match[2]); day = Number(match[1]);\n    normalized = match[3] + '-' + match[2] + '-' + match[1];\n  }\n  const date = new Date(Date.UTC(year, month - 1, day));\n  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return '';\n  return normalized;\n};\n\nconst buildIdempotencyKey = (input) => {\n  const groupId = String(input?.group_id ?? '').trim();\n  const messageId = String(input?.message_id ?? '').trim();\n  if (groupId && messageId) return 'waha:' + groupId + ':' + messageId;\n  const sourceFileId = String(input?.source_file_id ?? '').trim();\n  if (sourceFileId) return 'drive:' + sourceFileId;\n  return '';\n};\n\nconst reconcileOperationalLayout = (input) => {\n  const text = String(input.text ?? '').replace(/\\r/g, '');\n  const filename = String(input.filename ?? '');\n  const receiptByText = /comprovante\\s+(?:de\\s+)?pagamento/i.test(text)\n    || /pagamento\\s+(?:efetuado|realizado|conclu[ií]do)/i.test(text)\n    || (/comprovante/i.test(text) && (/\\bpix\\b/i.test(text) || /transa[cç][aã]o/i.test(text)))\n    || (/comprovante/i.test(text) && /comprovante/i.test(filename));\n  if (receiptByText) {\n    return { document_type: 'comprovante', department: 'contabil', warnings: ['TYPE_RECONCILED_FROM_PAYMENT_RECEIPT'] };\n  }\n  const fgtsCount = (text.match(/\\bFGTS\\b/gi) ?? []).length;\n  const fgtsByText = fgtsCount >= 2\n    || (/\\bFGTS\\b/i.test(text) && /fundo\\s+de\\s+garantia|guia[^\\n]{0,60}FGTS|FGTS\\s+digital|\\bGFD\\b/i.test(text));\n  if (fgtsByText) {\n    return { document_type: 'fgts', department: 'pessoal', warnings: ['TYPE_RECONCILED_FROM_FGTS_LAYOUT'] };\n  }\n  return { document_type: '', department: '', warnings: [] };\n};\n\nconst reconcileBoletoLayout = (input) => {\n  const text = String(input.text ?? '');\n  const compact = text.replace(/\\r/g, '');\n  const boletoMarkers = [\n    /ficha de compensa[cç][aã]o/i,\n    /linha digit[aá]vel/i,\n    /local de pagamento/i,\n    /nosso n[uú]mero/i,\n    /ag[eê]ncia\\s*\\/\\s*c[oó]d\\.?.*benefici[aá]rio/i,\n    /\\b\\d{5}\\.\\d{5}\\s+\\d{5}\\.\\d{6}\\s+\\d{5}\\.\\d{6}\\s+\\d\\s+\\d{14}\\b/,\n  ];\n  const markerCount = boletoMarkers.filter((pattern) => pattern.test(compact)).length;\n  if (markerCount < 2) return { is_boleto: false, issuer_name: '', issuer_cnpj: '', reference_date: '', due_date: '', document_number: '', recipient_name: '', warnings: [] };\n  const companyCnpj = digitsOnly(input.company_cnpj);\n  const signalCnpjs = Array.isArray(input.cnpjs) ? input.cnpjs.map(digitsOnly).filter(isValidCnpj) : [];\n  const issuerCnpj = signalCnpjs.find((cnpj) => cnpj !== companyCnpj) ?? '';\n  const beneficiaryMatch = compact.match(/Benefici[aá]rio[^\\n]*\\n\\s*([^\\n]{2,140}?)\\s+(\\d{14})\\b/i);\n  const issuerName = String(beneficiaryMatch?.[1] ?? '').replace(/\\s{2,}/g, ' ').trim();\n  const matchedCnpj = digitsOnly(beneficiaryMatch?.[2]);\n  const documentLine = compact.match(/Data do documento[^\\n]*N.?\\s*documento[^\\n]*\\n\\s*(\\d{2}\\/\\d{2}\\/\\d{4})\\s+([A-Za-z0-9._\\/-]+)/i);\n  const dueMatch = compact.match(/Vencimento[^\\n]*\\n[^\\n]*?(\\d{2}\\/\\d{2}\\/\\d{4})/i);\n  const payerMatch = compact.match(/Nome do pagador[^\\n]*\\n\\s*([^\\n]{2,140}?)(?:\\s{3,}|$)/i);\n  return {\n    is_boleto: true,\n    issuer_name: issuerName,\n    issuer_cnpj: isValidCnpj(matchedCnpj) && matchedCnpj !== companyCnpj ? matchedCnpj : issuerCnpj,\n    reference_date: String(documentLine?.[1] ?? ''),\n    due_date: String(dueMatch?.[1] ?? ''),\n    document_number: String(documentLine?.[2] ?? ''),\n    recipient_name: String(payerMatch?.[1] ?? '').replace(/\\s{2,}/g, ' ').trim(),\n    warnings: ['TYPE_RECONCILED_FROM_BOLETO_LAYOUT'],\n  };\n};\n\nconst reconcileFiscalIdentity = (input) => {\n  const accessKeyTypes = new Set(['nf-e','nfc-e','ct-e','mdf-e']);\n  const warnings = Array.isArray(input.warnings) ? input.warnings.map(String) : [];\n  const reviewReasons = [];\n  const rawCandidates = Array.isArray(input.access_key_candidates) ? input.access_key_candidates : [];\n  const candidates = [...new Set(rawCandidates.map(digitsOnly).filter(Boolean))];\n  const inspected = candidates.map(inspectAccessKey);\n  const valid = inspected.find((item) => item.valid);\n  let documentType = String(input.document_type ?? 'outro').toLowerCase();\n  let department = String(input.department ?? 'revisar').toLowerCase();\n  let issuerCnpj = digitsOnly(input.issuer_cnpj);\n  if (valid) {\n    if (documentType !== valid.document_type) warnings.push('TYPE_RECONCILED_FROM_ACCESS_KEY');\n    documentType = valid.document_type;\n    department = 'fiscal';\n    if (issuerCnpj && issuerCnpj !== valid.issuer_cnpj) warnings.push('ISSUER_CNPJ_RECONCILED_FROM_ACCESS_KEY');\n    issuerCnpj = valid.issuer_cnpj;\n  } else if (accessKeyTypes.has(documentType)) {\n    reviewReasons.push(candidates.length ? 'FISCAL_ACCESS_KEY_INVALID' : 'FISCAL_ACCESS_KEY_NOT_EVIDENCED');\n  }\n  if (issuerCnpj && !isValidCnpj(issuerCnpj)) reviewReasons.push('ISSUER_CNPJ_INVALID');\n  if (!issuerCnpj) reviewReasons.push('ISSUER_CNPJ_NOT_EVIDENCED');\n  return {\n    document_type: documentType,\n    department,\n    issuer_cnpj: isValidCnpj(issuerCnpj) ? issuerCnpj : '',\n    access_key: valid?.key ?? '',\n    access_key_model: valid?.model ?? '',\n    warnings: [...new Set(warnings)],\n    review_reasons: [...new Set(reviewReasons)],\n  };\n};\nconst request = $input.first().json;\nconst body = request.body ?? request;\nconst sourceFileId = String(body.source_file_id ?? '').trim();\nconst sourceFilename = String(body.source_filename ?? 'documento.pdf').trim();\nconst mimeType = String(body.mime_type ?? '').toLowerCase().trim();\nif (!sourceFileId) throw new Error('SOURCE_FILE_ID_REQUIRED');\nif (!['application/pdf','application/xml','text/xml','image/jpeg','image/png'].includes(mimeType)) throw new Error('UNSUPPORTED_MIME_TYPE');\nconst idempotencyKey = buildIdempotencyKey(body);\nif (!idempotencyKey) throw new Error('IDEMPOTENCY_KEY_REQUIRED');\nconst started = Date.now();\nreturn [{ json: {\n  benchmark_id: 'plx-v3-' + started + '-' + Math.random().toString(36).slice(2, 8),\n  source_file_id: sourceFileId,\n  source_filename: sourceFilename,\n  mime_type: mimeType,\n  idempotency_key: idempotencyKey,\n  group_id: String(body.group_id ?? '').trim(),\n  message_id: String(body.message_id ?? '').trim(),\n  sender_id: String(body.sender_id ?? '').trim(),\n  sha256: String(body.sha256 ?? '').trim().toLowerCase(),\n  received_at: String(body.received_at ?? new Date().toISOString()),\n  company_name: String(body.company_name ?? 'Giacomelli Transportes'),\n  company_legal_name: String(body.company_legal_name ?? 'Gilson Antonio Giacomelli Transportes Ltda'),\n  company_cnpj: String(body.company_cnpj ?? '09336455000157').replace(/\\D/g, ''),\n  started_at_ms: started,\n  started_at: new Date(started).toISOString(),\n  architecture_version: 'plx-shadow-v3.4.0',\n  model: 'nvidia/nemotron-3.5-lightning-30b-a3b'\n} }];"
+        },
+        "id": "772bcd48-bd49-4c35-8b7c-c82d691f9f7c",
+        "name": "Validar entrada e iniciar cronômetro",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          224,
+          96
+        ]
+      },
+      {
+        "parameters": {
+          "operation": "get",
+          "dataTableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "{{N8N_DATA_TABLE_ID}}",
+            "cachedResultName": "plx_v3_documentos"
+          },
+          "matchType": "allConditions",
+          "filters": {
+            "conditions": [
+              {
+                "keyName": "idempotency_key",
+                "keyValue": "={{ $('Validar entrada e iniciar cronômetro').item.json.idempotency_key }}"
+              }
+            ]
+          },
+          "returnAll": true
+        },
+        "id": "b4be25fb-d804-41bd-9f8c-69f7569fbffb",
+        "name": "Consultar idempotência no manifesto",
+        "type": "n8n-nodes-base.dataTable",
+        "typeVersion": 1.1,
+        "position": [
+          448,
+          96
+        ],
+        "alwaysOutputData": true
+      },
+      {
+        "parameters": {
+          "jsCode": "const base = $('Validar entrada e iniciar cronômetro').first().json;\nconst rows = $input.all().map((item) => item.json).filter((row) => row.idempotency_key === base.idempotency_key);\nconst existing = rows[0] ?? null;\nreturn [{ json: { ...base, duplicate: Boolean(existing), duplicate_record: existing } }];"
+        },
+        "id": "bf6c777a-9ca6-411f-bca1-556acc70d1e9",
+        "name": "Bloquear documento duplicado",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          672,
+          96
+        ]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 2
+            },
+            "conditions": [
+              {
+                "leftValue": "={{ $json.duplicate }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "id": "f5717627-6203-4551-9e52-b4e8e0cc60c6",
+        "name": "Documento já processado?",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          896,
+          96
+        ]
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ { ok: true, status: 'DUPLICATE', duplicate: true, idempotency_key: $json.idempotency_key, existing: { status: $json.duplicate_record?.status ?? '', drive_file_id: $json.duplicate_record?.drive_file_id ?? '', drive_path: $json.duplicate_record?.drive_path ?? '' } } }}",
+          "options": {
+            "responseCode": 200
+          }
+        },
+        "id": "6952e46e-cb5d-42ec-8fd0-251c10e4bf4b",
+        "name": "Responder documento duplicado",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.5,
+        "position": [
+          1120,
+          0
+        ]
+      },
+      {
+        "parameters": {
+          "operation": "download",
+          "fileId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{ $json.source_file_id }}"
+          },
+          "options": {
+            "binaryPropertyName": "data"
+          }
+        },
+        "id": "14741e88-a1e0-4874-9d0f-ef0a45fc7a8c",
+        "name": "Baixar arquivo de origem",
+        "type": "n8n-nodes-base.googleDrive",
+        "typeVersion": 3,
+        "position": [
+          1120,
+          192
+        ],
+        "retryOnFail": true,
+        "maxTries": 2,
+        "waitBetweenTries": 1000,
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "x28epy954tCGyrFD",
+            "name": "Google Drive account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "operation": "binaryToPropery",
+          "destinationKey": "document_base64",
+          "options": {}
+        },
+        "id": "d598c159-2cd9-4657-bf17-e62daebca328",
+        "name": "Converter binário em Base64",
+        "type": "n8n-nodes-base.extractFromFile",
+        "typeVersion": 1.1,
+        "position": [
+          1344,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "const base = $('Validar entrada e iniciar cronômetro').first().json;\nconst converted = $input.first().json;\nconst documentBase64 = String(converted.document_base64 ?? '');\nif (!documentBase64) throw new Error('DOCUMENT_BASE64_EMPTY');\nreturn [{ json: { ...base, document_base64: documentBase64, extract_started_at_ms: Date.now() } }];"
+        },
+        "id": "e78268d3-5bc7-402e-9337-2ed2d44a90b6",
+        "name": "Preparar extração sem reter binário",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1568,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "http://document-ai-gateway:8080/v1/document/extract",
+          "sendBody": true,
+          "contentType": "raw",
+          "rawContentType": "application/json",
+          "body": "={{ JSON.stringify({ mime_type: $json.mime_type, document_base64: $json.document_base64, filename: $json.source_filename }) }}",
+          "options": {
+            "timeout": 180000
+          }
+        },
+        "id": "bad06153-8fd5-4eb4-a15e-954489345543",
+        "name": "Extrair conteúdo no gateway híbrido",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.5,
+        "position": [
+          1792,
+          192
+        ],
+        "retryOnFail": true,
+        "maxTries": 2,
+        "waitBetweenTries": 1500
+      },
+      {
+        "parameters": {
+          "jsCode": "const base = $('Preparar extração sem reter binário').first().json;\nconst extraction = $input.first().json;\nconst text = String(extraction.text ?? '').trim().slice(0, 100000);\nif (!text.replace(/\\s/g, '').length) throw new Error('DOCUMENT_EXTRACTION_EMPTY');\nconst nullableString = { type: ['string','null'] };\nconst schema = {\n  type: 'object', additionalProperties: false,\n  properties: {\n    department: { type: 'string', enum: ['fiscal','contabil','pessoal','revisar'] },\n    document_type: { type: 'string', enum: ['nf-e','nfs-e','nfc-e','cupom-fiscal','ct-e','mdf-e','extrato','comprovante','recibo','boleto','fatura','balancete','razao','diario','dre','folha','holerite','fgts','inss','atestado','admissao','ferias','rescisao','ponto','afastamento','guia','outro'] },\n    issuer_name: nullableString, issuer_cnpj: nullableString,\n    recipient_name: nullableString, recipient_cnpj: nullableString,\n    document_number: nullableString, access_key: nullableString, reference_date: nullableString,\n    reference_date_source: { type: 'string', enum: ['issue','transaction','competence','due','unknown'] },\n    confidence: { type: 'number', minimum: 0, maximum: 1 },\n    evidence: { type: 'object', additionalProperties: false, properties: { type: nullableString, company: nullableString, date: nullableString }, required: ['type','company','date'] },\n    warnings: { type: 'array', items: { type: 'string' } }\n  },\n  required: ['department','document_type','issuer_name','issuer_cnpj','recipient_name','recipient_cnpj','document_number','access_key','reference_date','reference_date_source','confidence','evidence','warnings']\n};\nconst prompt = [\n  'Classifique um documento contábil brasileiro. Responda somente JSON válido.',\n  'Empresa atendida: ' + base.company_legal_name + '. CNPJ: ' + base.company_cnpj + '.',\n  'Nunca invente. Use null quando não houver evidência.',\n  'Fiscal: NF-e, NFS-e, NFC-e, cupom fiscal, CT-e e MDF-e.',\n  'Contábil: boleto, extrato bancário, comprovante de pagamento, recibo, fatura, balancete, razão, diário e DRE.',\n  'Pessoal: atestado, admissão, férias, rescisão, ponto, afastamento, folha, holerite, FGTS e INSS.',\n  'A data deve ser a data própria do documento: emissão, transação, vencimento ou competência. Não use a data de recebimento.',\n  'Para documento fiscal, access_key deve conter a chave de acesso literal de 44 dígitos e reference_date_source deve ser issue.',\n  'department deve ser fiscal, contabil, pessoal ou revisar.',\n  'Inclua evidência literal curta para tipo, empresa e data.',\n  'CONTEUDO EXTRAIDO:', text\n].join('\\n');\nconst now = Date.now();\nreturn [{ json: {\n  ...base,\n  document_base64: undefined,\n  extracted_text_chars: text.replace(/\\s/g, '').length,\n  extraction_route: String(extraction.route ?? 'unknown'),\n  extraction_provider: String(extraction.provider ?? ''),\n  extraction_model: String(extraction.model ?? ''),\n  extraction_signals: extraction.signals && typeof extraction.signals === 'object' ? extraction.signals : {},\n  extracted_access_keys: Array.isArray(extraction.signals?.access_keys) ? extraction.signals.access_keys.map(String) : [],\n  extraction_mean_confidence: Number(extraction.mean_confidence ?? 0),\n  extraction_warnings: Array.isArray(extraction.warnings) ? extraction.warnings.map(String) : [],\n  extract_ms: now - Number(base.extract_started_at_ms),\n  prompt,\n  output_schema: schema,\n  classify_started_at_ms: now\n} }];"
+        },
+        "id": "34850d17-d60d-4843-a3e8-7592bae6aa1b",
+        "name": "Montar contrato de classificação",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          2016,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "http://document-ai-gateway:8080/v1/chat/completions",
+          "sendBody": true,
+          "contentType": "raw",
+          "rawContentType": "application/json",
+          "body": "={{ JSON.stringify({ model: $json.model, messages: [{ role: 'user', content: $json.prompt }], temperature: 0, max_tokens: 900, seed: 42, guided_json: $json.output_schema, chat_template_kwargs: { enable_thinking: false } }) }}",
+          "options": {
+            "timeout": 180000
+          }
+        },
+        "id": "9c668b8c-8c69-42ca-b624-08b7cd67f68e",
+        "name": "Classificar com Nemotron Lightning",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.5,
+        "position": [
+          2240,
+          192
+        ],
+        "retryOnFail": true,
+        "maxTries": 2,
+        "waitBetweenTries": 2000
+      },
+      {
+        "parameters": {
+          "jsCode": "const digitsOnly = (value) => String(value ?? '').replace(/\\D/g, '');\n\nconst isValidCnpj = (value) => {\n  const cnpj = digitsOnly(value);\n  if (cnpj.length !== 14 || /^(\\d)\\1{13}$/.test(cnpj)) return false;\n  const calculate = (length) => {\n    let sum = 0;\n    let weight = length - 7;\n    for (let index = 0; index < length; index += 1) {\n      sum += Number(cnpj[index]) * weight;\n      weight -= 1;\n      if (weight === 1) weight = 9;\n    }\n    const remainder = sum % 11;\n    return remainder < 2 ? 0 : 11 - remainder;\n  };\n  return calculate(12) === Number(cnpj[12]) && calculate(13) === Number(cnpj[13]);\n};\n\nconst inspectAccessKey = (value) => {\n  const key = digitsOnly(value);\n  const modelMap = { '55': 'nf-e', '65': 'nfc-e', '57': 'ct-e', '58': 'mdf-e' };\n  if (key.length !== 44) return { valid: false, key, model: '', document_type: '', issuer_cnpj: '', reason: 'ACCESS_KEY_LENGTH_INVALID' };\n  const model = key.slice(20, 22);\n  if (!modelMap[model]) return { valid: false, key, model, document_type: '', issuer_cnpj: key.slice(6, 20), reason: 'ACCESS_KEY_MODEL_UNSUPPORTED' };\n  let sum = 0;\n  let weight = 2;\n  for (let index = 42; index >= 0; index -= 1) {\n    sum += Number(key[index]) * weight;\n    weight = weight === 9 ? 2 : weight + 1;\n  }\n  const remainder = sum % 11;\n  const expected = remainder === 0 || remainder === 1 ? 0 : 11 - remainder;\n  if (expected !== Number(key[43])) return { valid: false, key, model, document_type: modelMap[model], issuer_cnpj: key.slice(6, 20), reason: 'ACCESS_KEY_CHECKSUM_INVALID' };\n  return { valid: true, key, model, document_type: modelMap[model], issuer_cnpj: key.slice(6, 20), reason: '' };\n};\n\nconst normalizeReferenceDate = (value) => {\n  const raw = String(value ?? '').trim();\n  let year = 0;\n  let month = 0;\n  let day = 0;\n  let normalized = '';\n  let match = raw.match(/^(\\d{4})-(\\d{2})-(\\d{2})$/);\n  if (match) {\n    year = Number(match[1]); month = Number(match[2]); day = Number(match[3]);\n    normalized = match[1] + '-' + match[2] + '-' + match[3];\n  } else {\n    match = raw.match(/^(\\d{2})\\/(\\d{2})\\/(\\d{4})$/);\n    if (!match) return '';\n    year = Number(match[3]); month = Number(match[2]); day = Number(match[1]);\n    normalized = match[3] + '-' + match[2] + '-' + match[1];\n  }\n  const date = new Date(Date.UTC(year, month - 1, day));\n  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return '';\n  return normalized;\n};\n\nconst buildIdempotencyKey = (input) => {\n  const groupId = String(input?.group_id ?? '').trim();\n  const messageId = String(input?.message_id ?? '').trim();\n  if (groupId && messageId) return 'waha:' + groupId + ':' + messageId;\n  const sourceFileId = String(input?.source_file_id ?? '').trim();\n  if (sourceFileId) return 'drive:' + sourceFileId;\n  return '';\n};\n\nconst reconcileOperationalLayout = (input) => {\n  const text = String(input.text ?? '').replace(/\\r/g, '');\n  const filename = String(input.filename ?? '');\n  const receiptByText = /comprovante\\s+(?:de\\s+)?pagamento/i.test(text)\n    || /pagamento\\s+(?:efetuado|realizado|conclu[ií]do)/i.test(text)\n    || (/comprovante/i.test(text) && (/\\bpix\\b/i.test(text) || /transa[cç][aã]o/i.test(text)))\n    || (/comprovante/i.test(text) && /comprovante/i.test(filename));\n  if (receiptByText) {\n    return { document_type: 'comprovante', department: 'contabil', warnings: ['TYPE_RECONCILED_FROM_PAYMENT_RECEIPT'] };\n  }\n  const fgtsCount = (text.match(/\\bFGTS\\b/gi) ?? []).length;\n  const fgtsByText = fgtsCount >= 2\n    || (/\\bFGTS\\b/i.test(text) && /fundo\\s+de\\s+garantia|guia[^\\n]{0,60}FGTS|FGTS\\s+digital|\\bGFD\\b/i.test(text));\n  if (fgtsByText) {\n    return { document_type: 'fgts', department: 'pessoal', warnings: ['TYPE_RECONCILED_FROM_FGTS_LAYOUT'] };\n  }\n  return { document_type: '', department: '', warnings: [] };\n};\n\nconst reconcileBoletoLayout = (input) => {\n  const text = String(input.text ?? '');\n  const compact = text.replace(/\\r/g, '');\n  const boletoMarkers = [\n    /ficha de compensa[cç][aã]o/i,\n    /linha digit[aá]vel/i,\n    /local de pagamento/i,\n    /nosso n[uú]mero/i,\n    /ag[eê]ncia\\s*\\/\\s*c[oó]d\\.?.*benefici[aá]rio/i,\n    /\\b\\d{5}\\.\\d{5}\\s+\\d{5}\\.\\d{6}\\s+\\d{5}\\.\\d{6}\\s+\\d\\s+\\d{14}\\b/,\n  ];\n  const markerCount = boletoMarkers.filter((pattern) => pattern.test(compact)).length;\n  if (markerCount < 2) return { is_boleto: false, issuer_name: '', issuer_cnpj: '', reference_date: '', due_date: '', document_number: '', recipient_name: '', warnings: [] };\n  const companyCnpj = digitsOnly(input.company_cnpj);\n  const signalCnpjs = Array.isArray(input.cnpjs) ? input.cnpjs.map(digitsOnly).filter(isValidCnpj) : [];\n  const issuerCnpj = signalCnpjs.find((cnpj) => cnpj !== companyCnpj) ?? '';\n  const beneficiaryMatch = compact.match(/Benefici[aá]rio[^\\n]*\\n\\s*([^\\n]{2,140}?)\\s+(\\d{14})\\b/i);\n  const issuerName = String(beneficiaryMatch?.[1] ?? '').replace(/\\s{2,}/g, ' ').trim();\n  const matchedCnpj = digitsOnly(beneficiaryMatch?.[2]);\n  const documentLine = compact.match(/Data do documento[^\\n]*N.?\\s*documento[^\\n]*\\n\\s*(\\d{2}\\/\\d{2}\\/\\d{4})\\s+([A-Za-z0-9._\\/-]+)/i);\n  const dueMatch = compact.match(/Vencimento[^\\n]*\\n[^\\n]*?(\\d{2}\\/\\d{2}\\/\\d{4})/i);\n  const payerMatch = compact.match(/Nome do pagador[^\\n]*\\n\\s*([^\\n]{2,140}?)(?:\\s{3,}|$)/i);\n  return {\n    is_boleto: true,\n    issuer_name: issuerName,\n    issuer_cnpj: isValidCnpj(matchedCnpj) && matchedCnpj !== companyCnpj ? matchedCnpj : issuerCnpj,\n    reference_date: String(documentLine?.[1] ?? ''),\n    due_date: String(dueMatch?.[1] ?? ''),\n    document_number: String(documentLine?.[2] ?? ''),\n    recipient_name: String(payerMatch?.[1] ?? '').replace(/\\s{2,}/g, ' ').trim(),\n    warnings: ['TYPE_RECONCILED_FROM_BOLETO_LAYOUT'],\n  };\n};\n\nconst reconcileFiscalIdentity = (input) => {\n  const accessKeyTypes = new Set(['nf-e','nfc-e','ct-e','mdf-e']);\n  const warnings = Array.isArray(input.warnings) ? input.warnings.map(String) : [];\n  const reviewReasons = [];\n  const rawCandidates = Array.isArray(input.access_key_candidates) ? input.access_key_candidates : [];\n  const candidates = [...new Set(rawCandidates.map(digitsOnly).filter(Boolean))];\n  const inspected = candidates.map(inspectAccessKey);\n  const valid = inspected.find((item) => item.valid);\n  let documentType = String(input.document_type ?? 'outro').toLowerCase();\n  let department = String(input.department ?? 'revisar').toLowerCase();\n  let issuerCnpj = digitsOnly(input.issuer_cnpj);\n  if (valid) {\n    if (documentType !== valid.document_type) warnings.push('TYPE_RECONCILED_FROM_ACCESS_KEY');\n    documentType = valid.document_type;\n    department = 'fiscal';\n    if (issuerCnpj && issuerCnpj !== valid.issuer_cnpj) warnings.push('ISSUER_CNPJ_RECONCILED_FROM_ACCESS_KEY');\n    issuerCnpj = valid.issuer_cnpj;\n  } else if (accessKeyTypes.has(documentType)) {\n    reviewReasons.push(candidates.length ? 'FISCAL_ACCESS_KEY_INVALID' : 'FISCAL_ACCESS_KEY_NOT_EVIDENCED');\n  }\n  if (issuerCnpj && !isValidCnpj(issuerCnpj)) reviewReasons.push('ISSUER_CNPJ_INVALID');\n  if (!issuerCnpj) reviewReasons.push('ISSUER_CNPJ_NOT_EVIDENCED');\n  return {\n    document_type: documentType,\n    department,\n    issuer_cnpj: isValidCnpj(issuerCnpj) ? issuerCnpj : '',\n    access_key: valid?.key ?? '',\n    access_key_model: valid?.model ?? '',\n    warnings: [...new Set(warnings)],\n    review_reasons: [...new Set(reviewReasons)],\n  };\n};\nconst response = $input.first().json;\nconst base = $('Montar contrato de classificação').first().json;\nconst raw = String(response.choices?.[0]?.message?.content ?? response.choices?.[0]?.message?.reasoning_content ?? '').trim();\nconst start = raw.indexOf('{');\nconst end = raw.lastIndexOf('}');\nlet parsed = {};\nlet invalid = start < 0 || end <= start;\nif (!invalid) { try { parsed = JSON.parse(raw.slice(start, end + 1)); } catch { invalid = true; } }\nconst allowedTypes = new Set(['nf-e','nfs-e','nfc-e','cupom-fiscal','ct-e','mdf-e','extrato','comprovante','recibo','boleto','fatura','balancete','razao','diario','dre','folha','holerite','fgts','inss','atestado','admissao','ferias','rescisao','ponto','afastamento','guia','outro']);\nconst departmentsByType = {\n  'nf-e':'fiscal','nfs-e':'fiscal','nfc-e':'fiscal','cupom-fiscal':'fiscal','ct-e':'fiscal','mdf-e':'fiscal',\n  extrato:'contabil',comprovante:'contabil',recibo:'contabil',boleto:'contabil',fatura:'contabil',balancete:'contabil',razao:'contabil',diario:'contabil',dre:'contabil',guia:'contabil',\n  folha:'pessoal',holerite:'pessoal',fgts:'pessoal',inss:'pessoal',atestado:'pessoal',admissao:'pessoal',ferias:'pessoal',rescisao:'pessoal',ponto:'pessoal',afastamento:'pessoal'\n};\nconst forbidden = new Set(['/','\\\\',':','*','?','\"','<','>','|']);\nconst clean = (v, fallback) => {\n  let s = Array.from(String(v ?? fallback)).map(ch => forbidden.has(ch) ? '-' : ch).join('');\n  s = s.split('\\n').join(' ').split('\\r').join(' ').split('\\t').join(' ').trim();\n  while (s.includes('  ')) s = s.split('  ').join(' ');\n  return s.slice(0, 120);\n};\nconst digits = (v) => Array.from(String(v ?? '')).filter(ch => ch >= '0' && ch <= '9').join('');\nlet docType = allowedTypes.has(String(parsed.document_type ?? '').toLowerCase()) ? String(parsed.document_type).toLowerCase() : 'outro';\nlet department = departmentsByType[docType] ?? String(parsed.department ?? 'revisar').toLowerCase();\nif (!['fiscal','contabil','pessoal'].includes(department)) department = 'revisar';\nlet confidence = Math.max(0, Math.min(Number(parsed.confidence ?? 0) || 0, 1));\nlet evidence = parsed.evidence && typeof parsed.evidence === 'object' ? parsed.evidence : {};\nconst reasons = [];\nconst accessKeyCandidates = [\n  ...(Array.isArray(base.extracted_access_keys) ? base.extracted_access_keys : []),\n  parsed.access_key\n].filter(Boolean);\nconst extractedText = String(base.prompt ?? '').split('CONTEUDO EXTRAIDO:').slice(1).join('CONTEUDO EXTRAIDO:');\nconst operationalLayout = reconcileOperationalLayout({ text: extractedText, filename: base.source_filename });\nconst boletoLayout = reconcileBoletoLayout({\n  text: extractedText,\n  company_cnpj: base.company_cnpj,\n  cnpjs: base.extraction_signals?.cnpjs,\n});\nlet issuerCnpjCandidate = parsed.issuer_cnpj;\nlet issuerNameCandidate = parsed.issuer_name;\nlet documentNumberCandidate = parsed.document_number;\nlet recipientNameCandidate = parsed.recipient_name;\nlet modelWarnings = Array.isArray(parsed.warnings) ? parsed.warnings : [];\nif (operationalLayout.document_type) {\n  docType = operationalLayout.document_type;\n  department = operationalLayout.department;\n  confidence = Math.max(confidence, 0.95);\n  modelWarnings = [...modelWarnings, ...operationalLayout.warnings];\n  evidence = {\n    ...evidence,\n    type: operationalLayout.document_type === 'fgts'\n      ? 'FGTS identificado por marcadores explícitos do documento'\n      : 'Comprovante de pagamento identificado por marcadores de liquidação',\n  };\n} else if (boletoLayout.is_boleto) {\n  docType = 'boleto';\n  department = 'contabil';\n  issuerCnpjCandidate = boletoLayout.issuer_cnpj || issuerCnpjCandidate;\n  issuerNameCandidate = boletoLayout.issuer_name || issuerNameCandidate;\n  documentNumberCandidate = boletoLayout.document_number || documentNumberCandidate;\n  recipientNameCandidate = boletoLayout.recipient_name || recipientNameCandidate;\n  confidence = Math.max(confidence, 0.95);\n  evidence = {\n    type: 'Boleto bancario identificado por linha digitavel e ficha de compensacao',\n    company: boletoLayout.issuer_name || String(evidence.company ?? ''),\n    date: boletoLayout.reference_date || boletoLayout.due_date || String(evidence.date ?? ''),\n  };\n  modelWarnings = [...modelWarnings, ...boletoLayout.warnings];\n  if (invalid) modelWarnings.push('MODEL_OUTPUT_INVALID_JSON_DETERMINISTIC_FALLBACK');\n}\nif (invalid && !boletoLayout.is_boleto && !operationalLayout.document_type) reasons.push('MODEL_OUTPUT_INVALID_JSON');\nif (!String(evidence.type ?? '').trim()) reasons.push('DOCUMENT_TYPE_NOT_EVIDENCED');\nif (confidence < 0.80) reasons.push('LOW_CONFIDENCE');\nconst fiscalIdentity = reconcileFiscalIdentity({\n  document_type: docType,\n  department,\n  issuer_cnpj: issuerCnpjCandidate,\n  access_key_candidates: accessKeyCandidates,\n  warnings: modelWarnings\n});\ndepartment = fiscalIdentity.department;\nif (fiscalIdentity.document_type === 'outro') reasons.push('UNKNOWN_OR_UNMAPPED_DOCUMENT_TYPE');\nreasons.push(...fiscalIdentity.review_reasons);\nconst issuerName = clean(issuerNameCandidate, 'EMITENTE NAO IDENTIFICADO');\nif (issuerName === 'EMITENTE NAO IDENTIFICADO') reasons.push('ISSUER_NOT_EVIDENCED');\nlet referenceDate = normalizeReferenceDate(boletoLayout.reference_date || parsed.reference_date);\nconst evidenceDate = normalizeReferenceDate(String(evidence.date ?? '').match(/\\d{4}-\\d{2}-\\d{2}|\\d{2}\\/\\d{2}\\/\\d{4}/)?.[0] ?? '');\nif (!referenceDate) { referenceDate = String(base.received_at).slice(0, 10); reasons.push('REFERENCE_DATE_FALLBACK_TO_RECEIVED'); }\nif (!String(evidence.date ?? '').trim()) reasons.push('REFERENCE_DATE_NOT_EVIDENCED');\nif (evidenceDate && evidenceDate !== referenceDate) reasons.push('REFERENCE_DATE_EVIDENCE_DIVERGENCE');\nconst referenceDateSource = boletoLayout.reference_date ? 'issue' : (['issue','transaction','competence','due','unknown'].includes(String(parsed.reference_date_source ?? '').toLowerCase()) ? String(parsed.reference_date_source).toLowerCase() : 'unknown');\nif (['nf-e','nfc-e','ct-e','mdf-e','nfs-e','cupom-fiscal'].includes(fiscalIdentity.document_type) && referenceDateSource !== 'issue') reasons.push('FISCAL_ISSUE_DATE_NOT_EVIDENCED');\nif (!String(evidence.company ?? '').trim() && !fiscalIdentity.access_key) reasons.push('ISSUER_IDENTITY_NOT_EVIDENCED');\nconst finished = Date.now();\nreturn [{ json: {\n  ...base,\n  prompt: undefined,\n  output_schema: undefined,\n  document_type: fiscalIdentity.document_type,\n  department,\n  issuer_name: issuerName,\n  issuer_name_raw: issuerName,\n  issuer_cnpj: fiscalIdentity.issuer_cnpj,\n  access_key: fiscalIdentity.access_key,\n  access_key_model: fiscalIdentity.access_key_model,\n  recipient_name: clean(recipientNameCandidate, base.company_name),\n  recipient_cnpj: digits(parsed.recipient_cnpj),\n  document_number: clean(documentNumberCandidate, 'SEM-NUMERO'),\n  reference_date: referenceDate,\n  reference_date_source: referenceDateSource,\n  confidence,\n  evidence,\n  warnings: fiscalIdentity.warnings,\n  review_required: reasons.length > 0,\n  review_reason: [...new Set(reasons)].join('|'),\n  classify_ms: finished - Number(base.classify_started_at_ms),\n  provider_request_id: String(response.id ?? ''),\n  drive_started_at_ms: finished\n} }];"
+        },
+        "id": "90e14e6b-d2c6-4ab8-9609-4b9d6839ff03",
+        "name": "Validar classificação e evidências",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          2464,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "operation": "get",
+          "dataTableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "dpYTL4WQMOWrpc0H",
+            "cachedResultName": "plx_v3_emitentes_canonicos"
+          },
+          "matchType": "allConditions",
+          "filters": {
+            "conditions": [
+              {
+                "keyName": "issuer_cnpj",
+                "keyValue": "={{ $('Validar classificação e evidências').item.json.issuer_cnpj }}"
+              }
+            ]
+          },
+          "returnAll": true
+        },
+        "id": "44f27d49-7ea3-4658-8643-722106186b3e",
+        "name": "Consultar emitente canônico por CNPJ",
+        "type": "n8n-nodes-base.dataTable",
+        "typeVersion": 1.1,
+        "position": [
+          2688,
+          192
+        ],
+        "alwaysOutputData": true
+      },
+      {
+        "parameters": {
+          "jsCode": "const base = $('Validar classificação e evidências').first().json;\nconst exact = base.issuer_cnpj && $input.all().map((item) => item.json).find((row) => String(row.issuer_cnpj ?? '').replace(/\\D/g, '') === base.issuer_cnpj && row.verified === true);\nconst reasons = String(base.review_reason ?? '').split('|').filter(Boolean);\nconst warnings = Array.isArray(base.warnings) ? [...base.warnings] : [];\nlet canonicalName = '';\nlet identityStatus = 'UNVERIFIED';\nif (exact) {\n  canonicalName = String(exact.canonical_name ?? '').trim();\n  if (canonicalName) {\n    identityStatus = 'CANONICAL';\n    if (canonicalName !== base.issuer_name_raw) warnings.push('ISSUER_NAME_RECONCILED_FROM_CNPJ');\n  } else {\n    reasons.push('CANONICAL_NAME_EMPTY');\n  }\n} else if (base.issuer_cnpj && base.issuer_name_raw && base.issuer_name_raw !== 'EMITENTE NAO IDENTIFICADO') {\n  identityStatus = 'EVIDENCED';\n  warnings.push('ISSUER_NOT_YET_CANONICAL');\n} else if (base.issuer_cnpj) {\n  reasons.push('ISSUER_NAME_NOT_EVIDENCED');\n} else {\n  reasons.push('ISSUER_CNPJ_NOT_EVIDENCED');\n}\nreturn [{ json: {\n  ...base,\n  issuer_name: canonicalName || base.issuer_name_raw,\n  issuer_name_canonical: canonicalName,\n  identity_status: identityStatus,\n  warnings: [...new Set(warnings)],\n  review_required: reasons.length > 0,\n  review_reason: [...new Set(reasons)].join('|')\n} }];"
+        },
+        "id": "e610a0a4-3325-4553-bb00-47839c458ffc",
+        "name": "Aplicar identidade canônica verificada",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          2912,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "const doc = $input.first().json;\nconst d = new Date(doc.reference_date + 'T12:00:00-03:00');\nconst months = ['01 - Janeiro','02 - Fevereiro','03 - Março','04 - Abril','05 - Maio','06 - Junho','07 - Julho','08 - Agosto','09 - Setembro','10 - Outubro','11 - Novembro','12 - Dezembro'];\nconst departmentFolders = { fiscal: '01 - Fiscal', contabil: '02 - Contabil', pessoal: '03 - Pessoal', revisar: '99 - Revisar' };\nconst typeLabels = { 'nf-e':'NF-e','nfs-e':'NFS-e','nfc-e':'NFC-e','cupom-fiscal':'Cupom fiscal','ct-e':'CT-e','mdf-e':'MDF-e',extrato:'Extrato',comprovante:'Comprovante',recibo:'Recibo',boleto:'Boleto',fatura:'Fatura',balancete:'Balancete',razao:'Razão',diario:'Diário',dre:'DRE',folha:'Folha',holerite:'Holerite',fgts:'FGTS',inss:'INSS',atestado:'Atestado',admissao:'Admissão',ferias:'Férias',rescisao:'Rescisão',ponto:'Ponto',afastamento:'Afastamento',guia:'Guia',outro:'Outro' };\nconst filename = String(doc.source_filename ?? '');\nconst dot = filename.lastIndexOf('.');\nconst candidate = dot >= 0 ? filename.slice(dot + 1).toLowerCase() : '';\nconst extValid = candidate.length >= 1 && candidate.length <= 8 && Array.from(candidate).every(ch => (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9'));\nconst mimeExtensions = { 'application/pdf': '.pdf', 'application/xml': '.xml', 'text/xml': '.xml', 'image/jpeg': '.jpg', 'image/png': '.png' };\nconst ext = extValid ? '.' + candidate : (mimeExtensions[String(doc.mime_type ?? '').toLowerCase()] ?? '');\nconst forbidden = new Set(['/','\\\\',':','*','?','\"','<','>','|']);\nconst clean = (v) => {\n  let s = Array.from(String(v ?? '')).map(ch => forbidden.has(ch) ? '-' : ch).join('');\n  s = s.split('\\n').join(' ').split('\\r').join(' ').split('\\t').join(' ').trim();\n  while (s.includes('  ')) s = s.split('  ').join(' ');\n  return s.slice(0, 120);\n};\nconst organizedFilename = clean(typeLabels[doc.document_type] ?? doc.document_type) + ' - ' + clean(doc.company_name) + ' - ' + doc.reference_date + ' - ' + clean(doc.document_number) + ' - ' + clean(doc.issuer_name) + ext;\nreturn [{ json: {\n  ...doc,\n  issuer_folder: clean(doc.issuer_name),\n  year_folder: String(d.getFullYear()),\n  department_folder: departmentFolders[doc.department] ?? '99 - Revisar',\n  month_folder: months[d.getMonth()],\n  day_folder: String(d.getDate()).padStart(2, '0'),\n  organized_filename: organizedFilename\n} }];"
+        },
+        "id": "80c0a3a2-ea22-465d-86a5-8da07f06547d",
+        "name": "Preparar hierarquia e nome final",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          3136,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "resource": "fileFolder",
+          "queryString": "={{ $json.issuer_folder }}",
+          "returnAll": true,
+          "filter": {
+            "driveId": {
+              "__rl": true,
+              "mode": "list",
+              "value": "My Drive"
+            },
+            "folderId": {
+              "__rl": true,
+              "mode": "id",
+              "value": "{{GOOGLE_DRIVE_INBOX_FOLDER_ID}}"
+            },
+            "whatToSearch": "folders",
+            "includeTrashed": false
+          },
+          "options": {
+            "fields": [
+              "id",
+              "name",
+              "mimeType"
+            ]
+          }
+        },
+        "id": "afe4698e-625d-4926-905f-e98ecedf10fe",
+        "name": "Buscar pasta emitente",
+        "type": "n8n-nodes-base.googleDrive",
+        "typeVersion": 3,
+        "position": [
+          3360,
+          192
+        ],
+        "retryOnFail": true,
+        "maxTries": 2,
+        "waitBetweenTries": 1000,
+        "alwaysOutputData": true,
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "x28epy954tCGyrFD",
+            "name": "Google Drive account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "const base = $('Preparar hierarquia e nome final').first().json;\nconst exact = $input.all().map(i => i.json).find(i => i.id && i.name === base.issuer_folder);\nreturn [{ json: { ...base, issuer_folder_id: exact?.id ?? '', folder_found: Boolean(exact) } }];"
+        },
+        "id": "428c5b79-b5c3-4336-b849-46ccf4184935",
+        "name": "Selecionar pasta emitente",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          3584,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 2
+            },
+            "conditions": [
+              {
+                "leftValue": "={{ $json.folder_found }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "id": "350f9073-712f-4602-a54f-16cdb0bc17ea",
+        "name": "Pasta emitente existe?",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          3808,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "const base = $('Selecionar pasta emitente').first().json;\nconst current = $input.first().json; const id = current.issuer_folder_id ?? current.id;\nif (!id) throw new Error('ISSUER_FOLDER_ID_MISSING'); return [{ json: { ...base, issuer_folder_id: id } }];"
+        },
+        "id": "ae0c04a2-f9b7-4c6a-9d50-bc8facae98dd",
+        "name": "Usar pasta emitente",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          4256,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "resource": "folder",
+          "name": "={{ $json.issuer_folder }}",
+          "driveId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "My Drive"
+          },
+          "folderId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "{{GOOGLE_DRIVE_INBOX_FOLDER_ID}}"
+          },
+          "options": {
+            "simplifyOutput": true
+          }
+        },
+        "id": "d3643e72-3ccd-4bdc-ae23-dea15a493f0e",
+        "name": "Criar pasta emitente",
+        "type": "n8n-nodes-base.googleDrive",
+        "typeVersion": 3,
+        "position": [
+          4032,
+          272
+        ],
+        "retryOnFail": true,
+        "maxTries": 2,
+        "waitBetweenTries": 1000,
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "x28epy954tCGyrFD",
+            "name": "Google Drive account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "resource": "fileFolder",
+          "queryString": "={{ $json.year_folder }}",
+          "returnAll": true,
+          "filter": {
+            "driveId": {
+              "__rl": true,
+              "mode": "list",
+              "value": "My Drive"
+            },
+            "folderId": {
+              "__rl": true,
+              "mode": "id",
+              "value": "={{ $json.issuer_folder_id }}"
+            },
+            "whatToSearch": "folders",
+            "includeTrashed": false
+          },
+          "options": {
+            "fields": [
+              "id",
+              "name",
+              "mimeType"
+            ]
+          }
+        },
+        "id": "2374632a-848e-4732-8d17-d8b8f22cfe40",
+        "name": "Buscar pasta ano",
+        "type": "n8n-nodes-base.googleDrive",
+        "typeVersion": 3,
+        "position": [
+          4480,
+          192
+        ],
+        "retryOnFail": true,
+        "maxTries": 2,
+        "waitBetweenTries": 1000,
+        "alwaysOutputData": true,
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "x28epy954tCGyrFD",
+            "name": "Google Drive account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "const base = $('Usar pasta emitente').first().json;\nconst exact = $input.all().map(i => i.json).find(i => i.id && i.name === base.year_folder);\nreturn [{ json: { ...base, year_folder_id: exact?.id ?? '', folder_found: Boolean(exact) } }];"
+        },
+        "id": "0766bead-0c05-4566-a9f4-134e911b8b0c",
+        "name": "Selecionar pasta ano",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          4704,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 2
+            },
+            "conditions": [
+              {
+                "leftValue": "={{ $json.folder_found }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "id": "a4680be2-fd34-4b5a-ae25-dd755d6229e0",
+        "name": "Pasta ano existe?",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          4928,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "const base = $('Selecionar pasta ano').first().json;\nconst current = $input.first().json; const id = current.year_folder_id ?? current.id;\nif (!id) throw new Error('YEAR_FOLDER_ID_MISSING'); return [{ json: { ...base, year_folder_id: id } }];"
+        },
+        "id": "7daf9937-a607-414c-9fa8-7dd5cba16a8c",
+        "name": "Usar pasta ano",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          5376,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "resource": "folder",
+          "name": "={{ $json.year_folder }}",
+          "driveId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "My Drive"
+          },
+          "folderId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{ $json.issuer_folder_id }}"
+          },
+          "options": {
+            "simplifyOutput": true
+          }
+        },
+        "id": "ffb013d0-8881-4f32-9297-e953fb6412ba",
+        "name": "Criar pasta ano",
+        "type": "n8n-nodes-base.googleDrive",
+        "typeVersion": 3,
+        "position": [
+          5152,
+          272
+        ],
+        "retryOnFail": true,
+        "maxTries": 2,
+        "waitBetweenTries": 1000,
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "x28epy954tCGyrFD",
+            "name": "Google Drive account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "resource": "fileFolder",
+          "queryString": "={{ $json.department_folder }}",
+          "returnAll": true,
+          "filter": {
+            "driveId": {
+              "__rl": true,
+              "mode": "list",
+              "value": "My Drive"
+            },
+            "folderId": {
+              "__rl": true,
+              "mode": "id",
+              "value": "={{ $json.year_folder_id }}"
+            },
+            "whatToSearch": "folders",
+            "includeTrashed": false
+          },
+          "options": {
+            "fields": [
+              "id",
+              "name",
+              "mimeType"
+            ]
+          }
+        },
+        "id": "87522cc9-5bc2-4f78-bcf8-2c3359c1e63d",
+        "name": "Buscar pasta departamento",
+        "type": "n8n-nodes-base.googleDrive",
+        "typeVersion": 3,
+        "position": [
+          5600,
+          192
+        ],
+        "retryOnFail": true,
+        "maxTries": 2,
+        "waitBetweenTries": 1000,
+        "alwaysOutputData": true,
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "x28epy954tCGyrFD",
+            "name": "Google Drive account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "const base = $('Usar pasta ano').first().json;\nconst exact = $input.all().map(i => i.json).find(i => i.id && i.name === base.department_folder);\nreturn [{ json: { ...base, department_folder_id: exact?.id ?? '', folder_found: Boolean(exact) } }];"
+        },
+        "id": "797ab58a-73c8-439a-8cfe-d72e6c439eb6",
+        "name": "Selecionar pasta departamento",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          5824,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 2
+            },
+            "conditions": [
+              {
+                "leftValue": "={{ $json.folder_found }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "id": "d2c080b8-d9c6-43ec-b945-e7ea975a7656",
+        "name": "Pasta departamento existe?",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          6048,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "const base = $('Selecionar pasta departamento').first().json;\nconst current = $input.first().json; const id = current.department_folder_id ?? current.id;\nif (!id) throw new Error('DEPARTMENT_FOLDER_ID_MISSING'); return [{ json: { ...base, department_folder_id: id } }];"
+        },
+        "id": "d01b401a-4c2a-4dc7-ae9a-4a4551d84c51",
+        "name": "Usar pasta departamento",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          6496,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "resource": "folder",
+          "name": "={{ $json.department_folder }}",
+          "driveId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "My Drive"
+          },
+          "folderId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{ $json.year_folder_id }}"
+          },
+          "options": {
+            "simplifyOutput": true
+          }
+        },
+        "id": "282cdab5-89aa-4733-9a50-f1f31d52fda3",
+        "name": "Criar pasta departamento",
+        "type": "n8n-nodes-base.googleDrive",
+        "typeVersion": 3,
+        "position": [
+          6272,
+          272
+        ],
+        "retryOnFail": true,
+        "maxTries": 2,
+        "waitBetweenTries": 1000,
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "x28epy954tCGyrFD",
+            "name": "Google Drive account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "resource": "fileFolder",
+          "queryString": "={{ $json.month_folder }}",
+          "returnAll": true,
+          "filter": {
+            "driveId": {
+              "__rl": true,
+              "mode": "list",
+              "value": "My Drive"
+            },
+            "folderId": {
+              "__rl": true,
+              "mode": "id",
+              "value": "={{ $json.department_folder_id }}"
+            },
+            "whatToSearch": "folders",
+            "includeTrashed": false
+          },
+          "options": {
+            "fields": [
+              "id",
+              "name",
+              "mimeType"
+            ]
+          }
+        },
+        "id": "2b6231a1-12ae-4045-97ec-33b8c5b4fd86",
+        "name": "Buscar pasta mês",
+        "type": "n8n-nodes-base.googleDrive",
+        "typeVersion": 3,
+        "position": [
+          6720,
+          192
+        ],
+        "retryOnFail": true,
+        "maxTries": 2,
+        "waitBetweenTries": 1000,
+        "alwaysOutputData": true,
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "x28epy954tCGyrFD",
+            "name": "Google Drive account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "const base = $('Usar pasta departamento').first().json;\nconst exact = $input.all().map(i => i.json).find(i => i.id && i.name === base.month_folder);\nreturn [{ json: { ...base, month_folder_id: exact?.id ?? '', folder_found: Boolean(exact) } }];"
+        },
+        "id": "92757ef5-d18d-42b2-aa8d-941e85831591",
+        "name": "Selecionar pasta mês",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          6944,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 2
+            },
+            "conditions": [
+              {
+                "leftValue": "={{ $json.folder_found }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "id": "6cb0b100-0120-46aa-b6fa-a5de39927b02",
+        "name": "Pasta mês existe?",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          7168,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "const base = $('Selecionar pasta mês').first().json;\nconst current = $input.first().json; const id = current.month_folder_id ?? current.id;\nif (!id) throw new Error('MONTH_FOLDER_ID_MISSING'); return [{ json: { ...base, month_folder_id: id } }];"
+        },
+        "id": "d65d53b6-da4d-4612-8537-3cdd2024aa53",
+        "name": "Usar pasta mês",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          7616,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "resource": "folder",
+          "name": "={{ $json.month_folder }}",
+          "driveId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "My Drive"
+          },
+          "folderId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{ $json.department_folder_id }}"
+          },
+          "options": {
+            "simplifyOutput": true
+          }
+        },
+        "id": "3e497855-2f03-4dce-b709-9c7b3d69aa06",
+        "name": "Criar pasta mês",
+        "type": "n8n-nodes-base.googleDrive",
+        "typeVersion": 3,
+        "position": [
+          7392,
+          272
+        ],
+        "retryOnFail": true,
+        "maxTries": 2,
+        "waitBetweenTries": 1000,
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "x28epy954tCGyrFD",
+            "name": "Google Drive account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "resource": "fileFolder",
+          "queryString": "={{ $json.day_folder }}",
+          "returnAll": true,
+          "filter": {
+            "driveId": {
+              "__rl": true,
+              "mode": "list",
+              "value": "My Drive"
+            },
+            "folderId": {
+              "__rl": true,
+              "mode": "id",
+              "value": "={{ $json.month_folder_id }}"
+            },
+            "whatToSearch": "folders",
+            "includeTrashed": false
+          },
+          "options": {
+            "fields": [
+              "id",
+              "name",
+              "mimeType"
+            ]
+          }
+        },
+        "id": "f5f82b49-6ed3-464f-90b1-c2438ab76e51",
+        "name": "Buscar pasta dia",
+        "type": "n8n-nodes-base.googleDrive",
+        "typeVersion": 3,
+        "position": [
+          7840,
+          192
+        ],
+        "retryOnFail": true,
+        "maxTries": 2,
+        "waitBetweenTries": 1000,
+        "alwaysOutputData": true,
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "x28epy954tCGyrFD",
+            "name": "Google Drive account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "const base = $('Usar pasta mês').first().json;\nconst exact = $input.all().map(i => i.json).find(i => i.id && i.name === base.day_folder);\nreturn [{ json: { ...base, day_folder_id: exact?.id ?? '', folder_found: Boolean(exact) } }];"
+        },
+        "id": "d093eb45-663f-4547-a67f-aca2c933469a",
+        "name": "Selecionar pasta dia",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          8064,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 2
+            },
+            "conditions": [
+              {
+                "leftValue": "={{ $json.folder_found }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "id": "a89fa2fe-5679-4026-84b5-8f023f8751d8",
+        "name": "Pasta dia existe?",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          8288,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "const base = $('Selecionar pasta dia').first().json;\nconst current = $input.first().json; const id = current.day_folder_id ?? current.id;\nif (!id) throw new Error('DAY_FOLDER_ID_MISSING'); return [{ json: { ...base, day_folder_id: id } }];"
+        },
+        "id": "eac8c86d-2584-46e0-955d-924def59e54e",
+        "name": "Usar pasta dia",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          8736,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "resource": "folder",
+          "name": "={{ $json.day_folder }}",
+          "driveId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "My Drive"
+          },
+          "folderId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{ $json.month_folder_id }}"
+          },
+          "options": {
+            "simplifyOutput": true
+          }
+        },
+        "id": "4ed40070-070c-4097-8d10-616d99fb6713",
+        "name": "Criar pasta dia",
+        "type": "n8n-nodes-base.googleDrive",
+        "typeVersion": 3,
+        "position": [
+          8512,
+          272
+        ],
+        "retryOnFail": true,
+        "maxTries": 2,
+        "waitBetweenTries": 1000,
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "x28epy954tCGyrFD",
+            "name": "Google Drive account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "operation": "copy",
+          "fileId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{ $('Usar pasta dia').item.json.source_file_id }}"
+          },
+          "name": "={{ $('Usar pasta dia').item.json.organized_filename }}",
+          "sameFolder": false,
+          "driveId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "My Drive"
+          },
+          "folderId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{ $('Usar pasta dia').item.json.day_folder_id }}"
+          },
+          "options": {
+            "description": "Cópia criada pelo benchmark isolado PLX V3"
+          }
+        },
+        "id": "deaf689c-c560-4e8f-b1f4-c3348e204288",
+        "name": "Copiar arquivo para pasta final",
+        "type": "n8n-nodes-base.googleDrive",
+        "typeVersion": 3,
+        "position": [
+          8960,
+          192
+        ],
+        "retryOnFail": true,
+        "maxTries": 2,
+        "waitBetweenTries": 1000,
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "x28epy954tCGyrFD",
+            "name": "Google Drive account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "const base = $('Usar pasta dia').first().json;\nconst copy = $input.first().json;\nconst finished = Date.now();\nconst path = [base.issuer_folder, base.year_folder, base.department_folder, base.month_folder, base.day_folder, base.organized_filename].join('/');\nreturn [{ json: {\n  ...base,\n  status: base.review_required ? 'ORGANIZED_ATTENTION' : 'ORGANIZED',\n  drive_file_id: String(copy.id ?? ''),\n  drive_path: path,\n  drive_ms: finished - Number(base.drive_started_at_ms),\n  total_ms: finished - Number(base.started_at_ms),\n  finished_at: new Date(finished).toISOString()\n} }];"
+        },
+        "id": "ae59079c-47ca-4acf-a725-2db5e3a49e18",
+        "name": "Concluir benchmark",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          9184,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "dataTableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "{{N8N_DATA_TABLE_ID}}",
+            "cachedResultName": "plx_v3_documentos"
+          },
+          "columns": {
+            "mappingMode": "defineBelow",
+            "value": {
+              "idempotency_key": "={{ $('Concluir benchmark').item.json.idempotency_key }}",
+              "message_id": "={{ $('Concluir benchmark').item.json.message_id }}",
+              "sha256": "={{ $('Concluir benchmark').item.json.sha256 }}",
+              "group_id": "={{ $('Concluir benchmark').item.json.group_id }}",
+              "sender_id": "={{ $('Concluir benchmark').item.json.sender_id }}",
+              "source_file_id": "={{ $('Concluir benchmark').item.json.source_file_id }}",
+              "original_filename": "={{ $('Concluir benchmark').item.json.source_filename }}",
+              "mime_type": "={{ $('Concluir benchmark').item.json.mime_type }}",
+              "status": "={{ $('Concluir benchmark').item.json.status }}",
+              "document_type": "={{ $('Concluir benchmark').item.json.document_type }}",
+              "department": "={{ $('Concluir benchmark').item.json.department }}",
+              "issuer_cnpj": "={{ $('Concluir benchmark').item.json.issuer_cnpj }}",
+              "issuer_name_raw": "={{ $('Concluir benchmark').item.json.issuer_name_raw }}",
+              "issuer_name_canonical": "={{ $('Concluir benchmark').item.json.issuer_name_canonical }}",
+              "identity_status": "={{ $('Concluir benchmark').item.json.identity_status }}",
+              "reference_date": "={{ $('Concluir benchmark').item.json.reference_date }}",
+              "document_number": "={{ $('Concluir benchmark').item.json.document_number }}",
+              "confidence": "={{ $('Concluir benchmark').item.json.confidence }}",
+              "review_required": "={{ $('Concluir benchmark').item.json.review_required }}",
+              "review_reason": "={{ $('Concluir benchmark').item.json.review_reason }}",
+              "drive_file_id": "={{ $('Concluir benchmark').item.json.drive_file_id }}",
+              "drive_path": "={{ $('Concluir benchmark').item.json.drive_path }}",
+              "extract_ms": "={{ $('Concluir benchmark').item.json.extract_ms }}",
+              "classify_ms": "={{ $('Concluir benchmark').item.json.classify_ms }}",
+              "drive_ms": "={{ $('Concluir benchmark').item.json.drive_ms }}",
+              "total_ms": "={{ $('Concluir benchmark').item.json.total_ms }}",
+              "attempt_count": 1,
+              "last_error": "",
+              "received_at": "={{ $('Concluir benchmark').item.json.received_at }}",
+              "organized_at": "={{ $('Concluir benchmark').item.json.finished_at }}",
+              "updated_at": "={{ $('Concluir benchmark').item.json.finished_at }}",
+              "issuer_name": "={{ $('Concluir benchmark').item.json.issuer_name || $('Concluir benchmark').item.json.issuer_name_canonical || '' }}",
+              "recipient_name": "={{ $('Concluir benchmark').item.json.recipient_name || '' }}",
+              "organized_filename": "={{ $('Concluir benchmark').item.json.organized_filename || '' }}",
+              "organized_path": "={{ $('Concluir benchmark').item.json.organized_path || $('Concluir benchmark').item.json.drive_path || '' }}",
+              "drive_web_url": "={{ $('Concluir benchmark').item.json.drive_web_url || '' }}"
+            }
+          },
+          "options": {}
+        },
+        "id": "c0e0dee0-320b-49bf-990b-1374920677d7",
+        "name": "Gravar resultado final no manifesto",
+        "type": "n8n-nodes-base.dataTable",
+        "typeVersion": 1.1,
+        "position": [
+          9408,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "dataTableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "IVpafEYuvb0zue1l",
+            "cachedResultName": "plx_benchmark_v3_execucoes"
+          },
+          "columns": {
+            "mappingMode": "defineBelow",
+            "value": {
+              "benchmark_id": "={{ $('Concluir benchmark').item.json.benchmark_id }}",
+              "source_file_id": "={{ $('Concluir benchmark').item.json.source_file_id }}",
+              "source_filename": "={{ $('Concluir benchmark').item.json.source_filename }}",
+              "mime_type": "={{ $('Concluir benchmark').item.json.mime_type }}",
+              "status": "={{ $('Concluir benchmark').item.json.status }}",
+              "document_type": "={{ $('Concluir benchmark').item.json.document_type }}",
+              "department": "={{ $('Concluir benchmark').item.json.department }}",
+              "issuer_name": "={{ $('Concluir benchmark').item.json.issuer_name }}",
+              "reference_date": "={{ $('Concluir benchmark').item.json.reference_date }}",
+              "confidence": "={{ $('Concluir benchmark').item.json.confidence }}",
+              "review_required": "={{ $('Concluir benchmark').item.json.review_required }}",
+              "review_reason": "={{ $('Concluir benchmark').item.json.review_reason }}",
+              "extraction_route": "={{ $('Concluir benchmark').item.json.extraction_route }}",
+              "model": "={{ $('Concluir benchmark').item.json.model }}",
+              "drive_file_id": "={{ $('Concluir benchmark').item.json.drive_file_id }}",
+              "drive_path": "={{ $('Concluir benchmark').item.json.drive_path }}",
+              "extract_ms": "={{ $('Concluir benchmark').item.json.extract_ms }}",
+              "classify_ms": "={{ $('Concluir benchmark').item.json.classify_ms }}",
+              "drive_ms": "={{ $('Concluir benchmark').item.json.drive_ms }}",
+              "total_ms": "={{ $('Concluir benchmark').item.json.total_ms }}",
+              "started_at": "={{ $('Concluir benchmark').item.json.started_at }}",
+              "finished_at": "={{ $('Concluir benchmark').item.json.finished_at }}"
+            }
+          },
+          "options": {}
+        },
+        "id": "b6a4618f-9e58-422b-87de-3084fe88b490",
+        "name": "Registrar métricas do benchmark",
+        "type": "n8n-nodes-base.dataTable",
+        "typeVersion": 1.1,
+        "position": [
+          9632,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ { ok: true, benchmark_id: $('Concluir benchmark').first().json.benchmark_id, status: $('Concluir benchmark').first().json.status, document_type: $('Concluir benchmark').first().json.document_type, department: $('Concluir benchmark').first().json.department, review_required: $('Concluir benchmark').first().json.review_required, confidence: $('Concluir benchmark').first().json.confidence, drive_file_id: $('Concluir benchmark').first().json.drive_file_id, drive_path: $('Concluir benchmark').first().json.drive_path, metrics: { extract_ms: $('Concluir benchmark').first().json.extract_ms, classify_ms: $('Concluir benchmark').first().json.classify_ms, drive_ms: $('Concluir benchmark').first().json.drive_ms, total_ms: $('Concluir benchmark').first().json.total_ms } } }}",
+          "options": {
+            "responseCode": 200
+          }
+        },
+        "id": "c6b0ac75-559f-4f05-9f4c-a5994d24a70b",
+        "name": "Responder benchmark",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.5,
+        "position": [
+          9856,
+          192
+        ]
+      },
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "plx-v35-waha-ingress",
+          "authentication": "headerAuth",
+          "responseMode": "responseNode",
+          "options": {}
+        },
+        "id": "v35-ingress-webhook",
+        "name": "WAHA · Receber evento",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [
+          0,
+          -900
+        ],
+        "webhookId": "246e0377-5c7e-4e88-8296-6016f8488c16",
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "labInternalHeaderV1",
+            "name": "Laboratório · credencial interna"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "const input = $input.first().json;\nconst body = input.body ?? input;\nconst eventName = body.event ?? body.eventName ?? '';\nconst message = body.payload?.payload ?? body.payload ?? body.data ?? body;\nconst groupId = message.from ?? message.chatId ?? message.key?.remoteJid ?? message._data?.id?.remote ?? '';\nconst messageId = message.id ?? message.key?.id ?? message._data?.id?.id ?? '';\nconst fromMe = Boolean(message.fromMe ?? message.key?.fromMe ?? message._data?.id?.fromMe);\nconst media = message.media ?? message._data?.media ?? {};\nconst mediaUrl = media.url ?? message.mediaUrl ?? message.downloadUrl ?? '';\nconst mediaUrlText = String(mediaUrl);\nconst authorityMatch = /^([a-z][a-z0-9+.-]*):\\/\\/([^\\/?#]+)(?:[\\/?#]|$)/i.exec(mediaUrlText);\nconst mediaUrlAllowed = Boolean(authorityMatch && authorityMatch[1].toLowerCase() === 'http' && authorityMatch[2].toLowerCase() === 'waha:3000');\nconst mimeType = String(media.mimetype ?? media.mimeType ?? message.mimetype ?? message.mimeType ?? '').toLowerCase();\nconst filename = media.filename ?? message.filename ?? ('documento-' + (messageId || Date.now()));\nconst rawTimestamp = message.timestamp ?? body.timestamp;\nconst receivedAt = new Date(\n  rawTimestamp == null\n    ? Date.now()\n    : Number(rawTimestamp) * (String(rawTimestamp).length <= 10 ? 1000 : 1),\n).toISOString();\n\n// ALTERAR ANTES DE ATIVAR. Um número dedicado deve monitorar somente grupos autorizados.\nconst allowedGroups = ['{{WHATSAPP_GROUP_ID}}@g.us'];\nconst allowedMime = ['image/jpeg', 'image/png', 'application/pdf', 'application/xml', 'text/xml'];\nconst isMessageEvent = eventName === 'message';\nconst isGroup = String(groupId).endsWith('@g.us');\nconst hasMedia = Boolean(mediaUrl && mimeType);\nconst accepted = isMessageEvent && isGroup && allowedGroups.includes(groupId) && !fromMe && hasMedia && allowedMime.includes(mimeType) && mediaUrlAllowed;\nlet reason = 'accepted';\nif (!isMessageEvent) reason = 'ignored_event';\nelse if (!isGroup) reason = 'ignored_private_chat';\nelse if (!allowedGroups.includes(groupId)) reason = 'group_not_authorized';\nelse if (fromMe) reason = 'ignored_own_message';\nelse if (!hasMedia) reason = 'message_without_media';\nelse if (!allowedMime.includes(mimeType)) reason = 'unsupported_mime';\nelse if (!mediaUrlAllowed) reason = 'media_url_not_allowed';\n\nreturn [{ json: {\n  accepted, reason, event_name: eventName, session: body.session ?? message.session ?? '',\n  group_id: groupId, message_id: String(messageId), sender_id: String(message.author ?? message.participant ?? message.from ?? ''),\n  received_at: receivedAt, media_url: mediaUrl, mime_type: mimeType, original_filename: filename,\n  idempotency_key: ['waha', groupId, messageId].join(':'), raw_event_version: 'waha-v1',\n  suppress_confirmation: Boolean(body.suppress_confirmation ?? message.suppress_confirmation ?? false),\n  backfill_batch_id: String(body.backfill_batch_id ?? message.backfill_batch_id ?? '')\n} }];"
+        },
+        "id": "v35-ingress-normalize",
+        "name": "WAHA · Validar e normalizar",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          240,
+          -900
+        ]
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ { received: true, accepted: $json.accepted, reason: $json.reason, message_id: $json.message_id } }}",
+          "options": {
+            "responseCode": 202
+          }
+        },
+        "id": "v35-ingress-ack",
+        "name": "WAHA · Confirmar recebimento técnico",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.4,
+        "position": [
+          480,
+          -1020
+        ]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 2
+            },
+            "conditions": [
+              {
+                "id": "accepted",
+                "leftValue": "={{ $json.accepted }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "id": "v35-ingress-if",
+        "name": "WAHA · Documento autorizado?",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.2,
+        "position": [
+          720,
+          -900
+        ]
+      },
+      {
+        "parameters": {},
+        "id": "v35-ingress-ignored",
+        "name": "WAHA · Evento ignorado",
+        "type": "n8n-nodes-base.noOp",
+        "typeVersion": 1,
+        "position": [
+          960,
+          -700
+        ]
+      },
+      {
+        "parameters": {
+          "url": "={{ $json.media_url }}",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "options": {
+            "response": {
+              "response": {
+                "responseFormat": "file"
+              }
+            },
+            "timeout": 60000,
+            "redirect": {
+              "redirect": {
+                "followRedirects": false
+              }
+            }
+          }
+        },
+        "id": "v35-ingress-download",
+        "name": "WAHA · Baixar mídia",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          960,
+          -980
+        ],
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 5000,
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "wahaApiHeaderV1",
+            "name": "WAHA local · API"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "name": "={{ $(\"WAHA · Validar e normalizar\").first().json.original_filename }}",
+          "driveId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "My Drive",
+            "cachedResultName": "My Drive"
+          },
+          "folderId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "{{GOOGLE_DRIVE_INBOX_FOLDER_ID}}",
+            "cachedResultName": "PLX - LAB NOVA ARQUITETURA - 2026-10-02"
+          },
+          "options": {
+            "simplifyOutput": false
+          }
+        },
+        "id": "v35-ingress-upload",
+        "name": "Drive · Arquivar original",
+        "type": "n8n-nodes-base.googleDrive",
+        "typeVersion": 3,
+        "position": [
+          1220,
+          -1080
+        ],
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 5000,
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "x28epy954tCGyrFD",
+            "name": "Google Drive account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "binaryData": true,
+          "dataPropertyName": "sha256"
+        },
+        "id": "v35-ingress-hash",
+        "name": "Documento · Calcular SHA-256",
+        "type": "n8n-nodes-base.crypto",
+        "typeVersion": 2,
+        "position": [
+          1220,
+          -860
+        ]
+      },
+      {
+        "parameters": {
+          "mode": "combine",
+          "combineBy": "combineByPosition",
+          "options": {}
+        },
+        "id": "v35-ingress-merge",
+        "name": "Documento · Unir arquivo e hash",
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3.2,
+        "position": [
+          1460,
+          -980
+        ]
+      },
+      {
+        "id": "v35-ingress-envelope",
+        "name": "Fila · Montar envelope durável",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1700,
+          -980
+        ],
+        "parameters": {
+          "mode": "runOnceForAllItems",
+          "language": "javaScript",
+          "jsCode": "const src = $('WAHA · Validar e normalizar').first().json;\nconst merged = $input.first().json;\nconst driveId = String(merged.id || merged.drive_file_id || '');\nif (!driveId) throw new Error('SOURCE_DRIVE_FILE_ID_MISSING');\nreturn [{ json: {\n  source_file_id: driveId,\n  source_filename: src.original_filename,\n  mime_type: src.mime_type,\n  group_id: src.group_id,\n  message_id: src.message_id,\n  sender_id: src.sender_id,\n  sha256: String(merged.sha256 || ''),\n  received_at: src.received_at,\n  company_name: 'Giacomelli Transportes',\n  company_legal_name: 'Gilson Antonio Giacomelli Transportes Ltda',\n  company_cnpj: '09336455000157',\n  idempotency_key: src.idempotency_key\n} }];"
+        }
+      },
+      {
+        "id": "v35-ingress-enqueue",
+        "name": "Fila · Enfileirar documento",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.5,
+        "position": [
+          1940,
+          -980
+        ],
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 2000,
+        "parameters": {
+          "method": "POST",
+          "url": "http://plx-ingress-queue:8090/v1/documents",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendBody": true,
+          "contentType": "raw",
+          "rawContentType": "application/json",
+          "body": "={{ JSON.stringify($json) }}",
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "labInternalHeaderV1",
+            "name": "Laboratório · credencial interna"
+          }
+        },
+        "notes": "No cutover, o token desta credencial deve ser igual a INTERNAL_TOKEN da fila."
+      },
+      {
+        "id": "v35-ingress-queued",
+        "name": "Fila · Documento persistido",
+        "type": "n8n-nodes-base.noOp",
+        "typeVersion": 1,
+        "position": [
+          2180,
+          -980
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "v35-ingress-note",
+        "name": "Entrada WAHA e fila",
+        "type": "n8n-nodes-base.stickyNote",
+        "typeVersion": 1,
+        "position": [
+          0,
+          -1240
+        ],
+        "parameters": {
+          "content": "## Entrada WAHA → original → fila durável\nResponde 202 rapidamente, preserva o original no Drive e enfileira apenas a referência. A fila serializa os documentos e chama o webhook interno de processamento.",
+          "width": 1150,
+          "height": 220,
+          "color": 5
+        }
+      },
+      {
+        "id": "v35-content-lookup",
+        "name": "Consultar documento pelo SHA-256",
+        "type": "n8n-nodes-base.dataTable",
+        "typeVersion": 1.1,
+        "position": [
+          1120,
+          80
+        ],
+        "parameters": {
+          "operation": "get",
+          "dataTableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "{{N8N_DATA_TABLE_ID}}",
+            "cachedResultName": "plx_v3_documentos"
+          },
+          "matchType": "allConditions",
+          "filters": {
+            "conditions": [
+              {
+                "keyName": "sha256",
+                "keyValue": "={{ $('Validar entrada e iniciar cronômetro').item.json.sha256 }}"
+              }
+            ]
+          },
+          "returnAll": true
+        }
+      },
+      {
+        "id": "v35-content-decision",
+        "name": "Identificar conteúdo já organizado",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1340,
+          80
+        ],
+        "parameters": {
+          "jsCode": "const base = $('Bloquear documento duplicado').first().json;\nconst sha = String(base.sha256 || '').trim().toLowerCase();\nconst rows = $input.all().map((item) => item.json);\nconst existing = sha ? rows.find((row) =>\n  String(row.sha256 || '').trim().toLowerCase() === sha &&\n  ['ORGANIZED','ORGANIZED_ATTENTION'].includes(String(row.status || '').toUpperCase()) &&\n  String(row.drive_file_id || '').trim()\n) : null;\nreturn [{ json: { ...base, content_duplicate: Boolean(existing), content_duplicate_record: existing || null } }];"
+        }
+      },
+      {
+        "id": "v35-content-if",
+        "name": "Conteúdo já foi organizado?",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          1560,
+          80
+        ],
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 2
+            },
+            "conditions": [
+              {
+                "leftValue": "={{ $json.content_duplicate }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        }
+      },
+      {
+        "id": "v35-content-delete-source",
+        "name": "Remover cópia temporária repetida",
+        "type": "n8n-nodes-base.googleDrive",
+        "typeVersion": 3,
+        "position": [
+          1780,
+          -40
+        ],
+        "parameters": {
+          "resource": "file",
+          "operation": "delete",
+          "fileId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{ $('Identificar conteúdo já organizado').item.json.source_file_id }}"
+          },
+          "options": {}
+        },
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "x28epy954tCGyrFD",
+            "name": "Google Drive account"
+          }
+        },
+        "retryOnFail": true,
+        "maxTries": 2,
+        "waitBetweenTries": 1000,
+        "onError": "continueRegularOutput",
+        "notes": "Remove somente a cópia recém-arquivada na caixa de entrada. O arquivo final já organizado permanece intacto."
+      },
+      {
+        "id": "v35-content-receipt",
+        "name": "Registrar reenvio sem duplicar arquivo",
+        "type": "n8n-nodes-base.dataTable",
+        "typeVersion": 1.1,
+        "position": [
+          2000,
+          -40
+        ],
+        "parameters": {
+          "dataTableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "{{N8N_DATA_TABLE_ID}}",
+            "cachedResultName": "plx_v3_documentos"
+          },
+          "columns": {
+            "mappingMode": "defineBelow",
+            "value": {
+              "idempotency_key": "={{ $('Identificar conteúdo já organizado').item.json.idempotency_key }}",
+              "message_id": "={{ $('Identificar conteúdo já organizado').item.json.message_id }}",
+              "sha256": "={{ $('Identificar conteúdo já organizado').item.json.sha256 }}",
+              "group_id": "={{ $('Identificar conteúdo já organizado').item.json.group_id }}",
+              "sender_id": "={{ $('Identificar conteúdo já organizado').item.json.sender_id }}",
+              "source_file_id": "={{ $('Identificar conteúdo já organizado').item.json.content_duplicate_record.source_file_id || $('Identificar conteúdo já organizado').item.json.content_duplicate_record.drive_file_id }}",
+              "original_filename": "={{ $('Identificar conteúdo já organizado').item.json.source_filename }}",
+              "mime_type": "={{ $('Identificar conteúdo já organizado').item.json.mime_type }}",
+              "status": "DUPLICATE_CONTENT",
+              "document_type": "={{ $('Identificar conteúdo já organizado').item.json.content_duplicate_record.document_type || '' }}",
+              "department": "={{ $('Identificar conteúdo já organizado').item.json.content_duplicate_record.department || '' }}",
+              "issuer_cnpj": "={{ $('Identificar conteúdo já organizado').item.json.content_duplicate_record.issuer_cnpj || '' }}",
+              "issuer_name_raw": "={{ $('Identificar conteúdo já organizado').item.json.content_duplicate_record.issuer_name_raw || '' }}",
+              "issuer_name_canonical": "={{ $('Identificar conteúdo já organizado').item.json.content_duplicate_record.issuer_name_canonical || '' }}",
+              "issuer_name": "={{ $('Identificar conteúdo já organizado').item.json.content_duplicate_record.issuer_name || $('Identificar conteúdo já organizado').item.json.content_duplicate_record.issuer_name_canonical || '' }}",
+              "recipient_name": "={{ $('Identificar conteúdo já organizado').item.json.content_duplicate_record.recipient_name || '' }}",
+              "identity_status": "={{ $('Identificar conteúdo já organizado').item.json.content_duplicate_record.identity_status || '' }}",
+              "reference_date": "={{ $('Identificar conteúdo já organizado').item.json.content_duplicate_record.reference_date || '' }}",
+              "document_number": "={{ $('Identificar conteúdo já organizado').item.json.content_duplicate_record.document_number || '' }}",
+              "confidence": "={{ $('Identificar conteúdo já organizado').item.json.content_duplicate_record.confidence || 0 }}",
+              "review_required": false,
+              "review_reason": "CONTENT_ALREADY_ORGANIZED",
+              "drive_file_id": "={{ $('Identificar conteúdo já organizado').item.json.content_duplicate_record.drive_file_id }}",
+              "drive_path": "={{ $('Identificar conteúdo já organizado').item.json.content_duplicate_record.drive_path }}",
+              "organized_filename": "={{ $('Identificar conteúdo já organizado').item.json.content_duplicate_record.organized_filename || $('Identificar conteúdo já organizado').item.json.content_duplicate_record.original_filename || '' }}",
+              "organized_path": "={{ $('Identificar conteúdo já organizado').item.json.content_duplicate_record.organized_path || $('Identificar conteúdo já organizado').item.json.content_duplicate_record.drive_path || '' }}",
+              "drive_web_url": "={{ $('Identificar conteúdo já organizado').item.json.content_duplicate_record.drive_web_url || '' }}",
+              "attempt_count": 1,
+              "last_error": "",
+              "received_at": "={{ $('Identificar conteúdo já organizado').item.json.received_at }}",
+              "organized_at": "={{ $('Identificar conteúdo já organizado').item.json.content_duplicate_record.organized_at || $now.toISO() }}",
+              "updated_at": "={{ $now.toISO() }}"
+            }
+          },
+          "options": {}
+        }
+      },
+      {
+        "id": "v35-content-confirm-text",
+        "name": "Preparar confirmação de arquivo já recebido",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          2220,
+          -40
+        ],
+        "parameters": {
+          "jsCode": "const current = $('Identificar conteúdo já organizado').first().json;\nconst existing = current.content_duplicate_record || {};\nconst previous = existing.received_at ? new Intl.DateTimeFormat('pt-BR', { timeZone:'America/Sao_Paulo', dateStyle:'short', timeStyle:'short' }).format(new Date(existing.received_at)) : 'data não informada';\nreturn [{ json: {\n  group_id: current.group_id,\n  text: '♻️ Arquivo já recebido e organizado anteriormente.\\n' +\n    'Não foi criada uma nova cópia.\\n' +\n    'Arquivo: ' + current.source_filename + '\\n' +\n    'Recebimento anterior: ' + previous + '\\n' +\n    'Local: ' + (existing.drive_path || 'arquivo já registrado no Drive')\n} }];"
+        }
+      },
+      {
+        "id": "v35-content-confirm-send",
+        "name": "WhatsApp · Confirmar arquivo já recebido",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.5,
+        "position": [
+          2440,
+          -40
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://waha:3000/api/sendText",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendBody": true,
+          "contentType": "raw",
+          "rawContentType": "application/json",
+          "body": "={{ JSON.stringify({ session: 'contabilidade-lab', chatId: $json.group_id, text: $json.text }) }}",
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "wahaApiHeaderV1",
+            "name": "WAHA local · API"
+          }
+        },
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 3000,
+        "executeOnce": true,
+        "notes": "Confirma exclusivamente reenvios idênticos; não envia conteúdo do documento.",
+        "onError": "continueRegularOutput"
+      },
+      {
+        "id": "v35-content-response",
+        "name": "Responder conteúdo já organizado",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.5,
+        "position": [
+          2660,
+          -40
+        ],
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ { ok:true, status:'DUPLICATE_CONTENT', duplicate_content:true, idempotency_key:$('Identificar conteúdo já organizado').item.json.idempotency_key, received_at:$('Identificar conteúdo já organizado').item.json.received_at, existing:{ received_at:$('Identificar conteúdo já organizado').item.json.content_duplicate_record.received_at || '', drive_file_id:$('Identificar conteúdo já organizado').item.json.content_duplicate_record.drive_file_id || '', drive_path:$('Identificar conteúdo já organizado').item.json.content_duplicate_record.drive_path || '' } } }}",
+          "options": {
+            "responseCode": 200
+          }
+        }
+      },
+      {
+        "id": "v35-confirm-code",
+        "name": "WhatsApp · Preparar confirmação",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          900,
+          780
+        ],
+        "parameters": {
+          "mode": "runOnceForAllItems",
+          "language": "javaScript",
+          "jsCode": "const doc = $('Concluir benchmark').first().json;\nconst labels = { fiscal:'Fiscal', contabil:'Contábil', pessoal:'Pessoal', revisar:'Revisar' };\nconst reasonLabels = {\n  MODEL_OUTPUT_INVALID_JSON: 'a leitura da IA não retornou dados válidos',\n  DOCUMENT_EXTRACTION_EMPTY: 'não foi possível ler o conteúdo do arquivo',\n  OCR_LOW_CONFIDENCE: 'a imagem está pouco legível',\n  LOW_CONFIDENCE: 'a classificação precisa de conferência',\n  REFERENCE_DATE_FALLBACK_TO_RECEIVED: 'a data do documento não foi identificada; foi usada a data de recebimento',\n  REFERENCE_DATE_NOT_EVIDENCED: 'a data do documento não foi identificada',\n  FISCAL_ACCESS_KEY_INVALID: 'a chave fiscal está ausente ou inválida',\n  FISCAL_ACCESS_KEY_NOT_EVIDENCED: 'a chave fiscal não foi localizada',\n  ISSUER_NOT_EVIDENCED: 'o emitente ou beneficiário não foi identificado',\n  ISSUER_CNPJ_NOT_EVIDENCED: 'o CNPJ do emitente não foi identificado',\n  ISSUER_CNPJ_INVALID: 'o CNPJ identificado é inválido',\n  ISSUER_NAME_NOT_EVIDENCED: 'o nome do emitente não foi identificado',\n  UNKNOWN_OR_UNMAPPED_DOCUMENT_TYPE: 'o tipo do documento não foi identificado'\n};\nconst reasons = String(doc.review_reason || '').split('|').filter(Boolean).map((reason) => reasonLabels[reason] || reason);\nconst attention = doc.review_required ? '\\n⚠️ Precisa de atenção: ' + (reasons.join('; ') || 'conferência humana solicitada') : '';\nreturn [{ json: {\n  group_id: doc.group_id,\n  message_id: doc.message_id,\n  text: '✅ Documento salvo e organizado.\\n' +\n    'Tipo: ' + doc.document_type + '\\n' +\n    'Departamento: ' + (labels[doc.department] || doc.department) + '\\n' +\n    'Arquivo: ' + doc.organized_filename + attention\n} }];"
+        }
+      },
+      {
+        "id": "v35-confirm-send",
+        "name": "WhatsApp · Enviar confirmação",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.5,
+        "position": [
+          1140,
+          780
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://waha:3000/api/sendText",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendBody": true,
+          "contentType": "raw",
+          "rawContentType": "application/json",
+          "body": "={{ JSON.stringify({ session: 'contabilidade-lab', chatId: $json.group_id, text: $json.text }) }}",
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "wahaApiHeaderV1",
+            "name": "WAHA local · API"
+          }
+        },
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 3000,
+        "executeOnce": true,
+        "disabled": true,
+        "notes": "Habilitar somente no cutover. Falha de notificação não pode desfazer a organização do documento.",
+        "onError": "continueRegularOutput"
+      },
+      {
+        "id": "v35-confirm-done",
+        "name": "WhatsApp · Confirmação concluída",
+        "type": "n8n-nodes-base.noOp",
+        "typeVersion": 1,
+        "position": [
+          1380,
+          780
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "v35-daily-schedule",
+        "name": "Fechar dia às 18h",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          0,
+          1280
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "cronExpression",
+                "expression": "0 18 * * *"
+              }
+            ]
+          },
+          "misfirePolicy": "coalesce_owner",
+          "misfireGraceSeconds": 7200
+        }
+      },
+      {
+        "id": "v35-daily-manual",
+        "name": "Executar fechamento agora",
+        "type": "n8n-nodes-base.manualTrigger",
+        "typeVersion": 1,
+        "position": [
+          0,
+          1460
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "v35-daily-read",
+        "name": "Ler manifesto",
+        "type": "n8n-nodes-base.dataTable",
+        "typeVersion": 1.1,
+        "position": [
+          300,
+          1360
+        ],
+        "parameters": {
+          "resource": "row",
+          "operation": "get",
+          "dataTableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "{{N8N_DATA_TABLE_ID}}",
+            "cachedResultName": "plx_v3_documentos"
+          },
+          "matchType": "allConditions",
+          "filters": {
+            "conditions": []
+          },
+          "returnAll": true,
+          "orderBy": false
+        }
+      },
+      {
+        "id": "v35-daily-summary",
+        "name": "Consolidar documentos do dia",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          560,
+          1360
+        ],
+        "parameters": {
+          "jsCode": "const labels = {\n  MODEL_OUTPUT_INVALID_JSON: 'a leitura da IA não retornou dados válidos',\n  DOCUMENT_EXTRACTION_EMPTY: 'não foi possível ler o conteúdo do arquivo',\n  OCR_LOW_CONFIDENCE: 'a imagem está pouco legível',\n  LOW_CONFIDENCE: 'a classificação precisa de conferência',\n  REFERENCE_DATE_FALLBACK_TO_RECEIVED: 'data do documento não identificada; foi usada a data de recebimento para arquivar',\n  MISSING_REFERENCE_DATE: 'data do documento não identificada',\n  UNKNOWN_DOCUMENT_TYPE: 'tipo do documento não identificado',\n  FISCAL_ACCESS_KEY_INVALID: 'chave de acesso fiscal ausente ou inválida',\n  ISSUER_NOT_EVIDENCED: 'emitente/beneficiário não identificado',\n  RECIPIENT_NOT_EVIDENCED: 'destinatário/pagador não identificado',\n  PAYMENT_DUE_DATE_NOT_EVIDENCED: 'data de vencimento não identificada',\n  PAYMENT_AMOUNT_NOT_EVIDENCED: 'valor do documento de pagamento não identificado',\n  PAYMENT_BENEFICIARY_NOT_EVIDENCED: 'beneficiário não identificado',\n  PAYMENT_CODE_NOT_EVIDENCED: 'linha digitável ou código de barras não identificado'\n};\nconst rows = $input.all().map((item) => item.json);\nconst groupId = '{{WHATSAPP_GROUP_ID}}@g.us';\nconst fmtDate = (value) => new Intl.DateTimeFormat('en-CA', {\n  timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit'\n}).format(new Date(value));\nconst day = fmtDate(new Date());\nconst operationDate = (row) => row.organized_at || row.finished_at || row.updated_at || row.received_at || '';\nconst unique = new Map();\nfor (const row of rows) {\n  const key = String(row.idempotency_key || row.drive_file_id || row.benchmark_id || '').trim();\n  if (key && !unique.has(key)) unique.set(key, row);\n}\nconst today = [...unique.values()].filter((row) => {\n  if (!['ORGANIZED', 'ORGANIZED_ATTENTION'].includes(String(row.status || '').toUpperCase())) return false;\n  if (row.group_id && row.group_id !== groupId) return false;\n  const value = operationDate(row);\n  return value && fmtDate(value) === day;\n});\nconst typeLabels = {\n  'nf-e':'NF-e','nfs-e':'NFS-e','nfc-e':'NFC-e','cupom-fiscal':'Cupom fiscal','ct-e':'CT-e','mdf-e':'MDF-e',\n  extrato:'Extrato',comprovante:'Comprovante',recibo:'Recibo',boleto:'Boleto',fatura:'Fatura',balancete:'Balancete',\n  razao:'Razão',diario:'Diário',dre:'DRE',folha:'Folha',holerite:'Holerite',fgts:'FGTS',inss:'INSS',guia:'Guia',outro:'Outro'\n};\nconst departmentLabels = { fiscal:'Fiscal', financeiro:'Financeiro', contabil:'Contábil', pessoal:'Pessoal', revisar:'Revisar' };\nconst countBy = (key, labelsMap) => today.reduce((acc, row) => {\n  const raw = String(row[key] || (key === 'document_type' ? 'outro' : 'revisar')).toLowerCase();\n  const label = labelsMap[raw] || raw;\n  acc[label] = (acc[label] || 0) + 1;\n  return acc;\n}, {});\nconst byType = countBy('document_type', typeLabels);\nconst byDepartment = countBy('department', departmentLabels);\nconst pending = today.filter((row) => Boolean(row.review_required) || String(row.status).toUpperCase() === 'ORGANIZED_ATTENTION');\nconst lines = (record) => Object.entries(record).sort((a,b) => b[1] - a[1] || a[0].localeCompare(b[0], 'pt-BR')).map(([name,count]) => '• ' + name + ': ' + count).join('\\n');\nconst observations = pending.slice(0, 20).map((row) => {\n  const reasons = String(row.review_reason || '').split('|').filter(Boolean).map((reason) => labels[reason] || reason);\n  const name = row.organized_filename || row.final_filename || row.original_filename || 'arquivo sem nome';\n  return '• ' + name + ': ' + (reasons.join('; ') || 'conferência humana solicitada');\n}).join('\\n');\nconst report = [\n  '📋 Fechamento diário da triagem — ' + day.split('-').reverse().join('/'),\n  '',\n  '• Documentos armazenados: ' + today.length,\n  '• Sem pendência: ' + (today.length - pending.length),\n  '• Precisam de atenção: ' + pending.length,\n  '',\n  today.length ? 'Categorias:\\n' + lines(byType) : 'Nenhum documento foi organizado hoje.',\n  today.length ? '\\nDepartamentos:\\n' + lines(byDepartment) : '',\n  observations ? '\\nObservações:\\n' + observations : '\\nObservações: nenhuma pendência registrada.',\n  pending.length > 20 ? '• Há mais ' + (pending.length - 20) + ' pendência(s) no manifesto.' : '',\n  '',\n  'Arquivos permanecem no Drive e prontos para lançamento no sistema contábil.'\n].filter(Boolean).join('\\n');\nconst base = {\n  report_date: day,\n  total_day: today.length,\n  pending_count: pending.length,\n  group_id: groupId,\n  summary_text: report,\n  generated_at: new Date().toISOString()\n};\nif (!today.length) return [{ json: { ...base, status: 'NO_DOCUMENTS', review_required: false } }];\nreturn today.map((row) => ({ json: {\n  ...base,\n  status: 'CLOSED',\n  received_at: row.received_at || '',\n  organized_at: row.organized_at || '',\n  reference_date: row.reference_date || '',\n  document_type: row.document_type || '',\n  department: row.department || '',\n  issuer_name: row.issuer_name || '',\n  recipient_name: row.recipient_name || '',\n  organized_filename: row.organized_filename || row.final_filename || row.original_filename || '',\n  organized_path: row.organized_path || row.drive_path || '',\n  drive_url: row.drive_web_url || '',\n  review_required: Boolean(row.review_required),\n  review_reason: row.review_reason || '',\n  processing_status: row.status\n} }));",
+          "mode": "runOnceForAllItems",
+          "language": "javaScript"
+        }
+      },
+      {
+        "id": "v35-daily-csv",
+        "name": "Gerar CSV diário",
+        "type": "n8n-nodes-base.convertToFile",
+        "typeVersion": 1.1,
+        "position": [
+          820,
+          1360
+        ],
+        "parameters": {
+          "operation": "csv",
+          "binaryPropertyName": "data",
+          "options": {
+            "delimiter": ";",
+            "headerRow": true,
+            "fileName": "={{ 'fechamento-documentos-' + $json.report_date + '.csv' }}"
+          }
+        }
+      },
+      {
+        "id": "v35-daily-drive",
+        "name": "Arquivar fechamento no Drive",
+        "type": "n8n-nodes-base.googleDrive",
+        "typeVersion": 3,
+        "position": [
+          1080,
+          1360
+        ],
+        "parameters": {
+          "authentication": "oAuth2",
+          "resource": "file",
+          "operation": "upload",
+          "inputDataFieldName": "data",
+          "name": "",
+          "driveId": {
+            "__rl": true,
+            "mode": "list",
+            "value": "My Drive",
+            "cachedResultName": "My Drive"
+          },
+          "folderId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "{{GOOGLE_DRIVE_INBOX_FOLDER_ID}}",
+            "cachedResultName": "PLX - LAB NOVA ARQUITETURA - 2026-10-02"
+          },
+          "options": {
+            "simplifyOutput": false
+          }
+        },
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 5000,
+        "credentials": {
+          "googleDriveOAuth2Api": {
+            "id": "x28epy954tCGyrFD",
+            "name": "Google Drive account"
+          }
+        }
+      },
+      {
+        "id": "v35-daily-done",
+        "name": "Fechamento arquivado",
+        "type": "n8n-nodes-base.noOp",
+        "typeVersion": 1,
+        "position": [
+          1820,
+          1320
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "v35-daily-note-daily",
+        "name": "Fechamento diário",
+        "type": "n8n-nodes-base.stickyNote",
+        "typeVersion": 1,
+        "position": [
+          0,
+          1020
+        ],
+        "parameters": {
+          "content": "## Fechamento V3.5 às 18h\nConta documentos efetivamente organizados no dia, mesmo quando a data do documento é antiga. Resume categorias, departamentos e atenções; não calcula valores. O envio WAHA fica desabilitado até o cutover.",
+          "width": 900,
+          "height": 250,
+          "color": 5
+        }
+      },
+      {
+        "id": "v35-daily-prepare-final-message",
+        "name": "Preparar mensagem final",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1340,
+          1320
+        ],
+        "parameters": {
+          "mode": "runOnceForAllItems",
+          "language": "javaScript",
+          "jsCode": "const summary = $('Consolidar documentos do dia').first().json;\nreturn [{ json: { group_id: summary.group_id, summary_text: summary.summary_text } }];"
+        },
+        "executeOnce": true
+      },
+      {
+        "id": "v35-daily-send-final-message",
+        "name": "Enviar fechamento ao grupo",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.5,
+        "position": [
+          1580,
+          1320
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://waha:3000/api/sendText",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendBody": true,
+          "contentType": "raw",
+          "rawContentType": "application/json",
+          "body": "={{ JSON.stringify({ session: 'contabilidade-lab', chatId: $json.group_id, text: $json.summary_text }) }}",
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "wahaApiHeaderV1",
+            "name": "WAHA local · API"
+          }
+        },
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 3000,
+        "executeOnce": true,
+        "disabled": true,
+        "notes": "Habilitar junto com o Schedule Trigger somente no cutover."
+      }
+    ],
+    "connections": {
+      "Receber documento de benchmark": {
+        "main": [
+          [
+            {
+              "node": "Validar entrada e iniciar cronômetro",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Validar entrada e iniciar cronômetro": {
+        "main": [
+          [
+            {
+              "node": "Consultar idempotência no manifesto",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Consultar idempotência no manifesto": {
+        "main": [
+          [
+            {
+              "node": "Bloquear documento duplicado",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Bloquear documento duplicado": {
+        "main": [
+          [
+            {
+              "node": "Documento já processado?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Documento já processado?": {
+        "main": [
+          [
+            {
+              "node": "Responder documento duplicado",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Consultar documento pelo SHA-256",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Baixar arquivo de origem": {
+        "main": [
+          [
+            {
+              "node": "Converter binário em Base64",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Converter binário em Base64": {
+        "main": [
+          [
+            {
+              "node": "Preparar extração sem reter binário",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Preparar extração sem reter binário": {
+        "main": [
+          [
+            {
+              "node": "Extrair conteúdo no gateway híbrido",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extrair conteúdo no gateway híbrido": {
+        "main": [
+          [
+            {
+              "node": "Montar contrato de classificação",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Montar contrato de classificação": {
+        "main": [
+          [
+            {
+              "node": "Classificar com Nemotron Lightning",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Classificar com Nemotron Lightning": {
+        "main": [
+          [
+            {
+              "node": "Validar classificação e evidências",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Validar classificação e evidências": {
+        "main": [
+          [
+            {
+              "node": "Consultar emitente canônico por CNPJ",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Consultar emitente canônico por CNPJ": {
+        "main": [
+          [
+            {
+              "node": "Aplicar identidade canônica verificada",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Aplicar identidade canônica verificada": {
+        "main": [
+          [
+            {
+              "node": "Preparar hierarquia e nome final",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Preparar hierarquia e nome final": {
+        "main": [
+          [
+            {
+              "node": "Buscar pasta emitente",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Buscar pasta emitente": {
+        "main": [
+          [
+            {
+              "node": "Selecionar pasta emitente",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Selecionar pasta emitente": {
+        "main": [
+          [
+            {
+              "node": "Pasta emitente existe?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Pasta emitente existe?": {
+        "main": [
+          [
+            {
+              "node": "Usar pasta emitente",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Criar pasta emitente",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Usar pasta emitente": {
+        "main": [
+          [
+            {
+              "node": "Buscar pasta ano",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Criar pasta emitente": {
+        "main": [
+          [
+            {
+              "node": "Usar pasta emitente",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Buscar pasta ano": {
+        "main": [
+          [
+            {
+              "node": "Selecionar pasta ano",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Selecionar pasta ano": {
+        "main": [
+          [
+            {
+              "node": "Pasta ano existe?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Pasta ano existe?": {
+        "main": [
+          [
+            {
+              "node": "Usar pasta ano",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Criar pasta ano",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Usar pasta ano": {
+        "main": [
+          [
+            {
+              "node": "Buscar pasta departamento",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Criar pasta ano": {
+        "main": [
+          [
+            {
+              "node": "Usar pasta ano",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Buscar pasta departamento": {
+        "main": [
+          [
+            {
+              "node": "Selecionar pasta departamento",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Selecionar pasta departamento": {
+        "main": [
+          [
+            {
+              "node": "Pasta departamento existe?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Pasta departamento existe?": {
+        "main": [
+          [
+            {
+              "node": "Usar pasta departamento",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Criar pasta departamento",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Usar pasta departamento": {
+        "main": [
+          [
+            {
+              "node": "Buscar pasta mês",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Criar pasta departamento": {
+        "main": [
+          [
+            {
+              "node": "Usar pasta departamento",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Buscar pasta mês": {
+        "main": [
+          [
+            {
+              "node": "Selecionar pasta mês",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Selecionar pasta mês": {
+        "main": [
+          [
+            {
+              "node": "Pasta mês existe?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Pasta mês existe?": {
+        "main": [
+          [
+            {
+              "node": "Usar pasta mês",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Criar pasta mês",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Usar pasta mês": {
+        "main": [
+          [
+            {
+              "node": "Buscar pasta dia",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Criar pasta mês": {
+        "main": [
+          [
+            {
+              "node": "Usar pasta mês",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Buscar pasta dia": {
+        "main": [
+          [
+            {
+              "node": "Selecionar pasta dia",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Selecionar pasta dia": {
+        "main": [
+          [
+            {
+              "node": "Pasta dia existe?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Pasta dia existe?": {
+        "main": [
+          [
+            {
+              "node": "Usar pasta dia",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Criar pasta dia",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Usar pasta dia": {
+        "main": [
+          [
+            {
+              "node": "Copiar arquivo para pasta final",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Criar pasta dia": {
+        "main": [
+          [
+            {
+              "node": "Usar pasta dia",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Copiar arquivo para pasta final": {
+        "main": [
+          [
+            {
+              "node": "Concluir benchmark",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Concluir benchmark": {
+        "main": [
+          [
+            {
+              "node": "Gravar resultado final no manifesto",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Gravar resultado final no manifesto": {
+        "main": [
+          [
+            {
+              "node": "Registrar métricas do benchmark",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Registrar métricas do benchmark": {
+        "main": [
+          [
+            {
+              "node": "Responder benchmark",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "WhatsApp · Preparar confirmação",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "WAHA · Receber evento": {
+        "main": [
+          [
+            {
+              "node": "WAHA · Validar e normalizar",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "WAHA · Validar e normalizar": {
+        "main": [
+          [
+            {
+              "node": "WAHA · Confirmar recebimento técnico",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "WAHA · Confirmar recebimento técnico": {
+        "main": [
+          [
+            {
+              "node": "WAHA · Documento autorizado?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "WAHA · Documento autorizado?": {
+        "main": [
+          [
+            {
+              "node": "WAHA · Baixar mídia",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "WAHA · Evento ignorado",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "WAHA · Baixar mídia": {
+        "main": [
+          [
+            {
+              "node": "Drive · Arquivar original",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Documento · Calcular SHA-256",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Drive · Arquivar original": {
+        "main": [
+          [
+            {
+              "node": "Documento · Unir arquivo e hash",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Documento · Calcular SHA-256": {
+        "main": [
+          [
+            {
+              "node": "Documento · Unir arquivo e hash",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Documento · Unir arquivo e hash": {
+        "main": [
+          [
+            {
+              "node": "Fila · Montar envelope durável",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fila · Montar envelope durável": {
+        "main": [
+          [
+            {
+              "node": "Fila · Enfileirar documento",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fila · Enfileirar documento": {
+        "main": [
+          [
+            {
+              "node": "Fila · Documento persistido",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Consultar documento pelo SHA-256": {
+        "main": [
+          [
+            {
+              "node": "Identificar conteúdo já organizado",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Identificar conteúdo já organizado": {
+        "main": [
+          [
+            {
+              "node": "Conteúdo já foi organizado?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Conteúdo já foi organizado?": {
+        "main": [
+          [
+            {
+              "node": "Remover cópia temporária repetida",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Baixar arquivo de origem",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Remover cópia temporária repetida": {
+        "main": [
+          [
+            {
+              "node": "Registrar reenvio sem duplicar arquivo",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Registrar reenvio sem duplicar arquivo": {
+        "main": [
+          [
+            {
+              "node": "Preparar confirmação de arquivo já recebido",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Preparar confirmação de arquivo já recebido": {
+        "main": [
+          [
+            {
+              "node": "WhatsApp · Confirmar arquivo já recebido",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "WhatsApp · Confirmar arquivo já recebido": {
+        "main": [
+          [
+            {
+              "node": "Responder conteúdo já organizado",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "WhatsApp · Preparar confirmação": {
+        "main": [
+          [
+            {
+              "node": "WhatsApp · Enviar confirmação",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "WhatsApp · Enviar confirmação": {
+        "main": [
+          [
+            {
+              "node": "WhatsApp · Confirmação concluída",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Executar fechamento agora": {
+        "main": [
+          [
+            {
+              "node": "Ler manifesto",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Ler manifesto": {
+        "main": [
+          [
+            {
+              "node": "Consolidar documentos do dia",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Consolidar documentos do dia": {
+        "main": [
+          [
+            {
+              "node": "Gerar CSV diário",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Gerar CSV diário": {
+        "main": [
+          [
+            {
+              "node": "Arquivar fechamento no Drive",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fechar dia às 18h": {
+        "main": [
+          [
+            {
+              "node": "Ler manifesto",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Arquivar fechamento no Drive": {
+        "main": [
+          [
+            {
+              "node": "Preparar mensagem final",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Preparar mensagem final": {
+        "main": [
+          [
+            {
+              "node": "Enviar fechamento ao grupo",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Enviar fechamento ao grupo": {
+        "main": [
+          [
+            {
+              "node": "Fechamento arquivado",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "availableInMCP": true,
+      "binaryMode": "separate",
+      "timezone": "America/Sao_Paulo",
+      "executionTimeout": 600,
+      "saveDataSuccessExecution": "all",
+      "saveDataErrorExecution": "all",
+      "errorWorkflow": "documentErrorsV1"
+    },
+    "staticData": null,
+    "meta": {
+      "aiBuilderAssisted": true,
+      "builderVariant": "mcp"
+    },
+    "nodeGroups": [],
+    "pinData": {},
+    "sourceWorkflowId": null,
+    "tags": []
+  }
+]

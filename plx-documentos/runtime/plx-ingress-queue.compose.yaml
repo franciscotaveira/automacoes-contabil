@@ -1,0 +1,36 @@
+name: plx-document-ingress
+
+services:
+  plx-ingress-queue:
+    build:
+      context: ../plx-ingress-queue
+    environment:
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:?Defina o mesmo token da credencial interna do n8n}
+      N8N_ENDPOINT: http://n8n:5678/webhook/plx-v35-process-queue
+      RETRY_BASE_SECONDS: ${PLX_QUEUE_RETRY_BASE_SECONDS:-5}
+      MAX_ATTEMPTS: ${PLX_QUEUE_MAX_ATTEMPTS:-5}
+      QUEUE_DB: /data/plx-ingress.sqlite3
+    volumes:
+      - plx-ingress-queue-data:/data
+    networks:
+      - contabilidade-lab
+    restart: unless-stopped
+    init: true
+    mem_limit: 192m
+    cpus: 0.5
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: [CMD-SHELL, "wget -qO- http://127.0.0.1:8090/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  plx-ingress-queue-data:
+
+networks:
+  contabilidade-lab:
+    external: true
+    name: ${CONTABILIDADE_LAB_NETWORK:-contabilidade-lab_default}

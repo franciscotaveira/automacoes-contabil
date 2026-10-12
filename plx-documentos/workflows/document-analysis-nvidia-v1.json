@@ -1,0 +1,478 @@
+{
+  "id": "documentAnalysisNvidiaV1",
+  "name": "DOCUMENTOS · 02 · Analisar com NVIDIA",
+  "description": "Extrai e estrutura imagens fiscais com NVIDIA, valida regras determinísticas e encaminha baixa confiança para revisão humana.",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 300,
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "availableInMCP": true,
+    "errorWorkflow": "documentErrorsV1"
+  },
+  "nodes": [
+    {
+      "id": "trigger",
+      "name": "Receber documento arquivado",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "guard",
+      "name": "Configurar adaptador e validar mídia",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        300
+      ],
+      "parameters": {
+        "jsCode": "const doc = $input.first().json;\nconst mime = String(doc.mime_type ?? '').toLowerCase();\nconst allowed = ['image/jpeg', 'image/png'];\nconst base64 = String(doc.document_base64 ?? '');\nconst config = {\n  provider: 'nvidia_nim',\n  endpoint: 'https://integrate.api.nvidia.com/v1/chat/completions',\n  extractor_model: 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',\n  reasoning_model: 'nvidia/nemotron-3-ultra-550b-a55b',\n  max_base64_chars: 4000000,\n  confidence_threshold: 0.85\n};\nlet analysis_eligible = true;\nlet eligibility_reason = 'eligible';\nif (!allowed.includes(mime)) { analysis_eligible = false; eligibility_reason = 'PILOT_SUPPORTS_ONLY_JPEG_PNG'; }\nelse if (!base64) { analysis_eligible = false; eligibility_reason = 'MISSING_BINARY_CONTENT'; }\nelse if (base64.length > config.max_base64_chars) { analysis_eligible = false; eligibility_reason = 'IMAGE_REQUIRES_PREPROCESSING'; }\nreturn [{ json: { ...doc, ai_config: config, analysis_eligible, eligibility_reason, ai_started_at: new Date().toISOString() } }];"
+      }
+    },
+    {
+      "id": "eligible",
+      "name": "Imagem apta para IA?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        520,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "eligible",
+              "leftValue": "={{ $json.analysis_eligible }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "extract",
+      "name": "Extrair layout com NVIDIA",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        780,
+        160
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.ai_config.endpoint }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpTemplatedCustomAuth",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ model: $json.ai_config.extractor_model, messages: [{ role: \"user\", content: [{ type: \"text\", text: \"Extraia todo o conteúdo e preserve estrutura, campos e tabelas do documento fiscal. Não invente dados.\" }, { type: \"image_url\", image_url: { url: \"data:\" + $json.mime_type + \";base64,\" + $json.document_base64 } }] }], temperature: 0, max_tokens: 4096 }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "ocr",
+      "name": "Extrair conteúdo do OCR",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        160
+      ],
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst original = $('Configurar adaptador e validar mídia').first().json;\nconst content = response.choices?.[0]?.message?.content ?? response.output_text ?? response.text ?? '';\nif (!content) throw new Error('NVIDIA_EXTRACTOR_EMPTY_RESPONSE');\nreturn [{ json: { ...original, ocr_text: typeof content === 'string' ? content : JSON.stringify(content), extractor_request_id: response.id ?? '', extractor_usage: response.usage ?? {} } }];"
+      }
+    },
+    {
+      "id": "reasoning-packet",
+      "name": "Preparar raciocínio Nemotron",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        160
+      ],
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst prompt = [\n  'Você é um extrator de documentos fiscais brasileiros. Responda SOMENTE JSON válido, sem markdown.',\n  'Nunca invente valores. Use null quando não houver evidência.',\n  'Schema: {document_type, issuer_name, issuer_cnpj, recipient_name, recipient_cnpj, document_number, series, issue_date, access_key, total_amount, currency, confidence, evidence, warnings}.',\n  'confidence deve estar entre 0 e 1. evidence deve citar trechos literais do OCR por campo.',\n  'OCR:', item.ocr_text\n].join('\\n');\nreturn [{ json: { ...item, reasoning_prompt: prompt } }];"
+      }
+    },
+    {
+      "id": "reason",
+      "name": "Estruturar com Nemotron 550B",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1560,
+        160
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.ai_config.endpoint }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpTemplatedCustomAuth",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ model: $json.ai_config.reasoning_model, messages: [{ role: \"user\", content: $json.reasoning_prompt }], temperature: 0, max_tokens: 2500 }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "validate",
+      "name": "Validar schema e regras fiscais",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1820,
+        160
+      ],
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst original = $('Preparar raciocínio Nemotron').first().json;\nlet raw = response.choices?.[0]?.message?.content ?? response.output_text ?? '';\nraw = String(raw).trim().replace(/^\\x60\\x60\\x60(?:json)?/i, '').replace(/\\x60\\x60\\x60$/i, '').trim();\nlet parsed;\nlet invalidJson = false;\ntry { parsed = JSON.parse(raw); } catch { parsed = {}; invalidJson = true; }\nconst digits = (v) => String(v ?? '').replace(/\\D/g, '');\nconst warnings = Array.isArray(parsed.warnings) ? [...parsed.warnings] : [];\nif (invalidJson) warnings.push('MODEL_OUTPUT_INVALID_JSON');\nif (!parsed.document_type) warnings.push('MISSING_DOCUMENT_TYPE');\nif (!parsed.issuer_name && digits(parsed.issuer_cnpj).length !== 14) warnings.push('MISSING_ISSUER');\nif (!parsed.document_number) warnings.push('MISSING_DOCUMENT_NUMBER');\nif (parsed.access_key && digits(parsed.access_key).length !== 44) warnings.push('INVALID_ACCESS_KEY');\nif (parsed.issuer_cnpj && digits(parsed.issuer_cnpj).length !== 14) warnings.push('INVALID_ISSUER_CNPJ');\nconst confidence = Number(parsed.confidence ?? 0);\nconst reviewRequired = warnings.length > 0 || !Number.isFinite(confidence) || confidence < original.ai_config.confidence_threshold;\nconst finished = new Date();\nconst started = new Date(original.ai_started_at);\nconst normalized = { ...parsed, warnings, confidence: Number.isFinite(confidence) ? confidence : 0 };\nreturn [{ json: {\n  ...original,\n  document_type: normalized.document_type ?? 'unknown', status: reviewRequired ? 'REVIEW_REQUIRED' : 'AI_VALIDATED',\n  review_required: reviewRequired, review_reason: warnings.join('|') || (reviewRequired ? 'LOW_CONFIDENCE' : ''),\n  provider: original.ai_config.provider, model: original.ai_config.reasoning_model,\n  provider_request_id: response.id ?? original.extractor_request_id ?? '', processing_ms: Math.max(0, finished - started),\n  estimated_cost: 0, extracted_json: JSON.stringify({ normalized, ocr_text: original.ocr_text, usage: { extractor: original.extractor_usage, reasoning: response.usage ?? {} }, cost_status: 'CLIENT_BILLING_NOT_CONFIGURED' }),\n  updated_at: finished.toISOString()\n} }];"
+      }
+    },
+    {
+      "id": "manual-review",
+      "name": "Marcar para revisão humana",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        440
+      ],
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nreturn [{ json: { ...item, document_type: 'unsupported_in_pilot', status: 'REVIEW_REQUIRED', review_required: true, review_reason: item.eligibility_reason, provider: item.ai_config.provider, model: '', provider_request_id: '', processing_ms: 0, estimated_cost: 0, extracted_json: JSON.stringify({ reason: item.eligibility_reason }), updated_at: new Date().toISOString() } }];"
+      }
+    },
+    {
+      "id": "update",
+      "name": "Atualizar manifesto da análise",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2080,
+        300
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "documentos_contabeis_manifesto"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "idempotency_key",
+              "condition": "eq",
+              "keyValue": "={{ $json.idempotency_key }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "document_type": "={{ $json.document_type ?? '' }}",
+            "status": "={{ $json.status ?? '' }}",
+            "review_required": "={{ Boolean($json.review_required) }}",
+            "review_reason": "={{ $json.review_reason ?? '' }}",
+            "provider": "={{ $json.provider ?? '' }}",
+            "model": "={{ $json.model ?? '' }}",
+            "provider_request_id": "={{ $json.provider_request_id ?? '' }}",
+            "processing_ms": "={{ Number($json.processing_ms ?? 0) }}",
+            "estimated_cost": "={{ Number($json.estimated_cost ?? 0) }}",
+            "extracted_json": "={{ $json.extracted_json ?? '' }}",
+            "updated_at": "={{ $json.updated_at ?? '' }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "document_type",
+              "displayName": "document_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "review_required",
+              "displayName": "review_required",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "boolean",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "review_reason",
+              "displayName": "review_reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "provider",
+              "displayName": "provider",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "model",
+              "displayName": "model",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "provider_request_id",
+              "displayName": "provider_request_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "processing_ms",
+              "displayName": "processing_ms",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "estimated_cost",
+              "displayName": "estimated_cost",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "extracted_json",
+              "displayName": "extracted_json",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "date",
+              "canBeUsedToMatch": true
+            }
+          ]
+        },
+        "options": {
+          "dryRun": false
+        }
+      }
+    },
+    {
+      "id": "done",
+      "name": "Análise registrada",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2340,
+        300
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "note-ai",
+      "name": "Contrato do adaptador cognitivo",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -20,
+        -100
+      ],
+      "parameters": {
+        "content": "## 02 · Adaptador NVIDIA substituível\nSomente este workflow conhece o provedor. Hoje: `nemotron-3-nano-omni-30b-a3b-reasoning` para leitura visual e `nemotron-3-ultra-550b-a55b` para normalização.\n\nTrocar o provedor exige alterar este adaptador, mantendo o mesmo contrato de saída. PDFs/XML ficam em revisão no piloto até existir parser próprio. O original já estará arquivado no Drive.",
+        "width": 1160,
+        "height": 280,
+        "color": 5
+      }
+    }
+  ],
+  "connections": {
+    "Receber documento arquivado": {
+      "main": [
+        [
+          {
+            "node": "Configurar adaptador e validar mídia",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configurar adaptador e validar mídia": {
+      "main": [
+        [
+          {
+            "node": "Imagem apta para IA?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Imagem apta para IA?": {
+      "main": [
+        [
+          {
+            "node": "Extrair layout com NVIDIA",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Marcar para revisão humana",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extrair layout com NVIDIA": {
+      "main": [
+        [
+          {
+            "node": "Extrair conteúdo do OCR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extrair conteúdo do OCR": {
+      "main": [
+        [
+          {
+            "node": "Preparar raciocínio Nemotron",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar raciocínio Nemotron": {
+      "main": [
+        [
+          {
+            "node": "Estruturar com Nemotron 550B",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Estruturar com Nemotron 550B": {
+      "main": [
+        [
+          {
+            "node": "Validar schema e regras fiscais",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar schema e regras fiscais": {
+      "main": [
+        [
+          {
+            "node": "Atualizar manifesto da análise",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Marcar para revisão humana": {
+      "main": [
+        [
+          {
+            "node": "Atualizar manifesto da análise",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Atualizar manifesto da análise": {
+      "main": [
+        [
+          {
+            "node": "Análise registrada",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "tags": []
+}

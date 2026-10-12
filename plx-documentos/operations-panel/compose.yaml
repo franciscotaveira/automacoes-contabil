@@ -1,0 +1,32 @@
+name: plx-operations-panel
+services:
+  panel:
+    image: plx-documentos-plx-ingress-queue
+    pull_policy: never
+    command: [python, /app/server.py]
+    user: '65534:65534'
+    read_only: true
+    restart: unless-stopped
+    init: true
+    mem_limit: 128m
+    cpus: 0.3
+    pids_limit: 64
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ./server.py:/app/server.py:ro
+      - ./static:/app/static:ro
+      - ./data:/data:ro
+      - ./config:/config:ro
+    networks:
+      plx:
+        aliases: [plx-operations-panel]
+    healthcheck:
+      test: [CMD, wget, -qO-, -T, '3', 'http://127.0.0.1:8095/healthz']
+      interval: 20s
+      timeout: 4s
+      retries: 3
+networks:
+  plx:
+    external: true
+    name: plx-documentos_default

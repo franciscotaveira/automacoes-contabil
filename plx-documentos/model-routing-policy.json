@@ -1,0 +1,44 @@
+{
+  "version": "plx-nvidia-routing-v1",
+  "extraction": {
+    "deterministic_first": true,
+    "local_ocr": "tesseract-por-eng",
+    "barcode": "zbar",
+    "remote_ocr": "nvidia/nemotron-ocr-v2",
+    "layout_candidate": "nvidia/nemotron-parse-2.0",
+    "multimodal_fallback": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+  },
+  "classification": {
+    "primary": "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "primary_thinking": false,
+    "secondary": "nvidia/nemotron-3-super-120b-a12b",
+    "secondary_thinking": false,
+    "arbitrator": "nvidia/nemotron-3-ultra-550b-a55b",
+    "arbitrator_mode": "asynchronous_manual_or_batch"
+  },
+  "secondary_triggers": [
+    "MODEL_OUTPUT_INVALID_JSON",
+    "LOW_CONFIDENCE_WITH_LEGIBLE_TEXT",
+    "UNKNOWN_OR_UNMAPPED_DOCUMENT_TYPE_WITH_LEGIBLE_TEXT",
+    "REFERENCE_DATE_EVIDENCE_DIVERGENCE",
+    "MULTI_SECTION_CONTEXT"
+  ],
+  "never_infer_triggers": [
+    "MISSING_PRIMARY_EVIDENCE",
+    "FISCAL_ACCESS_KEY_INVALID",
+    "ISSUER_CNPJ_INVALID",
+    "UNREADABLE_DOCUMENT",
+    "MULTIPLE_DOCUMENTS_NOT_SEPARATED"
+  ],
+  "fallback": "human_review",
+  "required_telemetry": [
+    "extraction_route",
+    "primary_model",
+    "escalation_model",
+    "escalation_reason",
+    "latency_ms",
+    "token_usage",
+    "deterministic_validation",
+    "final_decision"
+  ]
+}

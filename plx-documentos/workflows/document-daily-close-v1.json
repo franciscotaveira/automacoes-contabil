@@ -1,0 +1,236 @@
+{
+  "id": "documentDailyCloseV1",
+  "name": "DOCUMENTOS · 03 · Fechamento diário",
+  "description": "Consolida os documentos recebidos no dia, gera CSV de auditoria e arquiva o fechamento no Google Drive.",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 300,
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "availableInMCP": true,
+    "timezone": "America/Sao_Paulo",
+    "errorWorkflow": "documentErrorsV1"
+  },
+  "nodes": [
+    {
+      "id": "schedule",
+      "name": "Fechar dia às 20h",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        180
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 20 * * *"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "manual",
+      "name": "Executar fechamento agora",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        360
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "read",
+      "name": "Ler manifesto",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        300,
+        260
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "documentos_contabeis_manifesto"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": []
+        },
+        "returnAll": true,
+        "orderBy": false
+      }
+    },
+    {
+      "id": "summary",
+      "name": "Consolidar documentos do dia",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        260
+      ],
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(i => i.json);\nconst day = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());\nconst today = rows.filter(r => String(r.received_at ?? '').slice(0, 10) === day);\nconst counts = today.reduce((acc, row) => { acc[row.status ?? 'UNKNOWN'] = (acc[row.status ?? 'UNKNOWN'] ?? 0) + 1; return acc; }, {});\nif (!today.length) return [{ json: { report_date: day, total: 0, status: 'NO_DOCUMENTS', generated_at: new Date().toISOString() } }];\nreturn today.map(row => ({ json: {\n  report_date: day, total_day: today.length, status_summary: JSON.stringify(counts),\n  received_at: row.received_at, group_id: row.group_id, message_id: row.message_id,\n  filename: row.original_filename, sha256: row.sha256, drive_url: row.drive_web_url,\n  document_type: row.document_type, processing_status: row.status,\n  review_required: row.review_required, review_reason: row.review_reason\n} }));"
+      }
+    },
+    {
+      "id": "csv",
+      "name": "Gerar CSV diário",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        820,
+        260
+      ],
+      "parameters": {
+        "operation": "csv",
+        "binaryPropertyName": "data",
+        "options": {
+          "delimiter": ";",
+          "headerRow": true,
+          "fileName": "={{ 'fechamento-documentos-' + $json.report_date + '.csv' }}"
+        }
+      }
+    },
+    {
+      "id": "drive",
+      "name": "Arquivar fechamento no Drive",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        1080,
+        260
+      ],
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "file",
+        "operation": "upload",
+        "inputDataFieldName": "data",
+        "name": "",
+        "driveId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "My Drive",
+          "cachedResultName": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "CONFIGURE_DRIVE_REPORTS_FOLDER_ID"
+        },
+        "options": {
+          "simplifyOutput": false
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "done",
+      "name": "Fechamento arquivado",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        260
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "note-daily",
+      "name": "Fechamento diário",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -80
+      ],
+      "parameters": {
+        "content": "## 03 · Relatório diário\nGera CSV com documentos, links, estados e pendências de revisão. Não envia WhatsApp e não lança dados em sistema contábil.",
+        "width": 780,
+        "height": 210,
+        "color": 5
+      }
+    }
+  ],
+  "connections": {
+    "Fechar dia às 20h": {
+      "main": [
+        [
+          {
+            "node": "Ler manifesto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Executar fechamento agora": {
+      "main": [
+        [
+          {
+            "node": "Ler manifesto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ler manifesto": {
+      "main": [
+        [
+          {
+            "node": "Consolidar documentos do dia",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consolidar documentos do dia": {
+      "main": [
+        [
+          {
+            "node": "Gerar CSV diário",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gerar CSV diário": {
+      "main": [
+        [
+          {
+            "node": "Arquivar fechamento no Drive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Arquivar fechamento no Drive": {
+      "main": [
+        [
+          {
+            "node": "Fechamento arquivado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "tags": []
+}

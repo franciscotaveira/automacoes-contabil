@@ -1,0 +1,748 @@
+{
+  "id": "documentWahaIngestV1",
+  "name": "DOCUMENTOS · 01 · Capturar grupos WAHA",
+  "description": "Monitora grupos WAHA autorizados, arquiva documentos no Drive, deduplica e enfileira análise sem responder no WhatsApp.",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 300,
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "availableInMCP": true,
+    "errorWorkflow": "documentErrorsV1"
+  },
+  "nodes": [
+    {
+      "id": "webhook",
+      "name": "Receber evento WAHA",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        320
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "waha-grupos-documentos-v1",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "normalize",
+      "name": "Validar evento WAHA",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        320
+      ],
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst body = input.body ?? input;\nconst eventName = body.event ?? body.eventName ?? '';\nconst message = body.payload?.payload ?? body.payload ?? body.data ?? body;\nconst groupId = message.from ?? message.chatId ?? message.key?.remoteJid ?? message._data?.id?.remote ?? '';\nconst messageId = message.id ?? message.key?.id ?? message._data?.id?.id ?? '';\nconst fromMe = Boolean(message.fromMe ?? message.key?.fromMe ?? message._data?.id?.fromMe);\nconst media = message.media ?? message._data?.media ?? {};\nconst mediaUrl = media.url ?? message.mediaUrl ?? message.downloadUrl ?? '';\nconst mimeType = String(media.mimetype ?? media.mimeType ?? message.mimetype ?? message.mimeType ?? '').toLowerCase();\nconst filename = media.filename ?? message.filename ?? ('documento-' + (messageId || Date.now()));\nconst rawTimestamp = message.timestamp ?? body.timestamp;\nconst receivedAt = new Date(\n  rawTimestamp == null\n    ? Date.now()\n    : Number(rawTimestamp) * (String(rawTimestamp).length <= 10 ? 1000 : 1),\n).toISOString();\n\n// ALTERAR ANTES DE ATIVAR. Um número dedicado deve monitorar somente grupos autorizados.\nconst allowedGroups = ['CONFIGURE_GROUP_ID@g.us'];\nconst allowedMime = ['image/jpeg', 'image/png', 'application/pdf', 'application/xml', 'text/xml'];\nconst isMessageEvent = !eventName || ['message', 'message.any', 'message.received'].includes(eventName);\nconst isGroup = String(groupId).endsWith('@g.us');\nconst hasMedia = Boolean(mediaUrl && mimeType);\nconst accepted = isMessageEvent && isGroup && allowedGroups.includes(groupId) && !fromMe && hasMedia && allowedMime.includes(mimeType);\nlet reason = 'accepted';\nif (!isMessageEvent) reason = 'ignored_event';\nelse if (!isGroup) reason = 'ignored_private_chat';\nelse if (!allowedGroups.includes(groupId)) reason = 'group_not_authorized';\nelse if (fromMe) reason = 'ignored_own_message';\nelse if (!hasMedia) reason = 'message_without_media';\nelse if (!allowedMime.includes(mimeType)) reason = 'unsupported_mime';\n\nreturn [{ json: {\n  accepted, reason, event_name: eventName, session: body.session ?? message.session ?? '',\n  group_id: groupId, message_id: String(messageId), sender_id: String(message.author ?? message.participant ?? message.from ?? ''),\n  received_at: receivedAt, media_url: mediaUrl, mime_type: mimeType, original_filename: filename,\n  idempotency_key: ['waha', groupId, messageId].join(':'), raw_event_version: 'waha-v1'\n} }];"
+      }
+    },
+    {
+      "id": "ack",
+      "name": "Confirmar recebimento técnico",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        480,
+        200
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { received: true, accepted: $json.accepted, reason: $json.reason, message_id: $json.message_id } }}",
+        "options": {
+          "responseCode": 202
+        }
+      }
+    },
+    {
+      "id": "accepted",
+      "name": "Documento autorizado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        700,
+        320
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "accepted",
+              "leftValue": "={{ $json.accepted }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "dedupe",
+      "name": "Ignorar mensagem já processada",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        940,
+        240
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "rowNotExists",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "documentos_contabeis_manifesto"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "idempotency_key",
+              "condition": "eq",
+              "keyValue": "={{ $json.idempotency_key }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "download",
+      "name": "Baixar mídia do WAHA",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1180,
+        240
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.media_url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "data"
+            }
+          }
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "id": "base64",
+      "name": "Preparar cópia para análise",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        1420,
+        240
+      ],
+      "parameters": {
+        "operation": "binaryToPropery",
+        "destinationKey": "document_base64",
+        "keepSource": "both"
+      }
+    },
+    {
+      "id": "drive",
+      "name": "Arquivar original no Google Drive",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        1660,
+        120
+      ],
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "file",
+        "operation": "upload",
+        "inputDataFieldName": "data",
+        "name": "={{ $(\"Validar evento WAHA\").first().json.original_filename }}",
+        "driveId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "My Drive",
+          "cachedResultName": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "CONFIGURE_DRIVE_INBOX_FOLDER_ID"
+        },
+        "options": {
+          "simplifyOutput": false
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "hash",
+      "name": "Calcular SHA-256",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 2,
+      "position": [
+        1660,
+        360
+      ],
+      "parameters": {
+        "action": "hash",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "type": "SHA256",
+        "dataPropertyName": "sha256",
+        "encoding": "hex"
+      }
+    },
+    {
+      "id": "merge-drive-hash",
+      "name": "Unir arquivo e hash",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1900,
+        240
+      ],
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      }
+    },
+    {
+      "id": "packet",
+      "name": "Montar manifesto e pacote de IA",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2140,
+        240
+      ],
+      "parameters": {
+        "jsCode": "const src = $('Validar evento WAHA').first().json;\nconst merged = $input.first().json;\nconst driveId = merged.id ?? merged.drive_file_id ?? '';\nconst now = new Date().toISOString();\nreturn [{ json: {\n  ...src,\n  document_base64: merged.document_base64 ?? '',\n  sha256: merged.sha256 ?? '',\n  drive_file_id: driveId,\n  drive_web_url: merged.webViewLink ?? (driveId ? 'https://drive.google.com/open?id=' + driveId : ''),\n  document_type: 'pending_classification', status: 'ARCHIVED_PENDING_AI',\n  review_required: false, review_reason: '', provider: '', model: '', provider_request_id: '',\n  processing_ms: 0, estimated_cost: 0, extracted_json: '{}', created_at: now, updated_at: now\n} }];"
+      }
+    },
+    {
+      "id": "manifest-insert",
+      "name": "Registrar manifesto local",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2380,
+        100
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "documentos_contabeis_manifesto"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "idempotency_key": "={{ $json.idempotency_key ?? '' }}",
+            "message_id": "={{ $json.message_id ?? '' }}",
+            "group_id": "={{ $json.group_id ?? '' }}",
+            "sender_id": "={{ $json.sender_id ?? '' }}",
+            "received_at": "={{ $json.received_at ?? '' }}",
+            "document_type": "={{ $json.document_type ?? '' }}",
+            "mime_type": "={{ $json.mime_type ?? '' }}",
+            "original_filename": "={{ $json.original_filename ?? '' }}",
+            "sha256": "={{ $json.sha256 ?? '' }}",
+            "drive_file_id": "={{ $json.drive_file_id ?? '' }}",
+            "drive_web_url": "={{ $json.drive_web_url ?? '' }}",
+            "status": "={{ $json.status ?? '' }}",
+            "review_required": "={{ Boolean($json.review_required) }}",
+            "review_reason": "={{ $json.review_reason ?? '' }}",
+            "provider": "={{ $json.provider ?? '' }}",
+            "model": "={{ $json.model ?? '' }}",
+            "provider_request_id": "={{ $json.provider_request_id ?? '' }}",
+            "processing_ms": "={{ Number($json.processing_ms ?? 0) }}",
+            "estimated_cost": "={{ Number($json.estimated_cost ?? 0) }}",
+            "extracted_json": "={{ $json.extracted_json ?? '' }}",
+            "created_at": "={{ $json.created_at ?? '' }}",
+            "updated_at": "={{ $json.updated_at ?? '' }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "idempotency_key",
+              "displayName": "idempotency_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "message_id",
+              "displayName": "message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "group_id",
+              "displayName": "group_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "sender_id",
+              "displayName": "sender_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "received_at",
+              "displayName": "received_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "date",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "document_type",
+              "displayName": "document_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "mime_type",
+              "displayName": "mime_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "original_filename",
+              "displayName": "original_filename",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "sha256",
+              "displayName": "sha256",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "drive_file_id",
+              "displayName": "drive_file_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "drive_web_url",
+              "displayName": "drive_web_url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "review_required",
+              "displayName": "review_required",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "boolean",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "review_reason",
+              "displayName": "review_reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "provider",
+              "displayName": "provider",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "model",
+              "displayName": "model",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "provider_request_id",
+              "displayName": "provider_request_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "processing_ms",
+              "displayName": "processing_ms",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "estimated_cost",
+              "displayName": "estimated_cost",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "extracted_json",
+              "displayName": "extracted_json",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "date",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "date",
+              "canBeUsedToMatch": true
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "merge-persisted",
+      "name": "Confirmar arquivo persistido",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        2620,
+        240
+      ],
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      }
+    },
+    {
+      "id": "analysis",
+      "name": "Enfileirar análise documental",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        2860,
+        240
+      ],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "documentAnalysisNvidiaV1",
+          "cachedResultName": "DOCUMENTOS · 02 · Analisar com NVIDIA"
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      }
+    },
+    {
+      "id": "queued",
+      "name": "Documento arquivado e enfileirado",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        3100,
+        240
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "ignored",
+      "name": "Evento ignorado sem resposta",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        940,
+        480
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "note-scope",
+      "name": "Escopo operacional",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -120
+      ],
+      "parameters": {
+        "content": "## 01 · WAHA → arquivo original\n- monitora apenas grupos explicitamente autorizados;\n- não envia mensagens ao WhatsApp;\n- responde somente ao webhook técnico;\n- deduplica por grupo + messageId;\n- arquiva o original antes da IA;\n- IA roda em subworkflow assíncrono.\n\nAntes de ativar: preencher groupId, pasta do Drive e credenciais WAHA/Google.",
+        "width": 980,
+        "height": 300,
+        "color": 5
+      }
+    }
+  ],
+  "connections": {
+    "Receber evento WAHA": {
+      "main": [
+        [
+          {
+            "node": "Validar evento WAHA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar evento WAHA": {
+      "main": [
+        [
+          {
+            "node": "Confirmar recebimento técnico",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Confirmar recebimento técnico": {
+      "main": [
+        [
+          {
+            "node": "Documento autorizado?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Documento autorizado?": {
+      "main": [
+        [
+          {
+            "node": "Ignorar mensagem já processada",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Evento ignorado sem resposta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ignorar mensagem já processada": {
+      "main": [
+        [
+          {
+            "node": "Baixar mídia do WAHA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Baixar mídia do WAHA": {
+      "main": [
+        [
+          {
+            "node": "Preparar cópia para análise",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar cópia para análise": {
+      "main": [
+        [
+          {
+            "node": "Arquivar original no Google Drive",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Calcular SHA-256",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Arquivar original no Google Drive": {
+      "main": [
+        [
+          {
+            "node": "Unir arquivo e hash",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calcular SHA-256": {
+      "main": [
+        [
+          {
+            "node": "Unir arquivo e hash",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Unir arquivo e hash": {
+      "main": [
+        [
+          {
+            "node": "Montar manifesto e pacote de IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar manifesto e pacote de IA": {
+      "main": [
+        [
+          {
+            "node": "Registrar manifesto local",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Confirmar arquivo persistido",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registrar manifesto local": {
+      "main": [
+        [
+          {
+            "node": "Confirmar arquivo persistido",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Confirmar arquivo persistido": {
+      "main": [
+        [
+          {
+            "node": "Enfileirar análise documental",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enfileirar análise documental": {
+      "main": [
+        [
+          {
+            "node": "Documento arquivado e enfileirado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "tags": []
+}

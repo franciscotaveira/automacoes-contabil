@@ -1,0 +1,11 @@
+[Unit]
+Description=PLX operational read-only evidence collector
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/plx-operations-panel/collector.py
+TimeoutStartSec=80
+Nice=10
+UMask=0077

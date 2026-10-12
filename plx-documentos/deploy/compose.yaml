@@ -1,0 +1,208 @@
+name: ${COMPOSE_PROJECT_NAME:-plx-documentos}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: n8n_plx
+      POSTGRES_USER: n8n_plx
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Configure POSTGRES_PASSWORD}
+      TZ: ${TZ:-America/Sao_Paulo}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    init: true
+    mem_limit: 384m
+    cpus: 0.75
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U n8n_plx -d n8n_plx"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.41.6
+    entrypoint: [sh, /opt/plx/bootstrap/start.sh]
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: "5432"
+      DB_POSTGRESDB_DATABASE: n8n_plx
+      DB_POSTGRESDB_USER: n8n_plx
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      N8N_HOST: ${N8N_HOST:?Configure N8N_HOST}
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
+      N8N_EDITOR_BASE_URL: ${N8N_EDITOR_BASE_URL:?Configure N8N_EDITOR_BASE_URL}
+      N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL:?Configure N8N_WEBHOOK_URL}
+      N8N_PROXY_HOPS: "1"
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Configure N8N_ENCRYPTION_KEY}
+      N8N_SECURE_COOKIE: ${N8N_SECURE_COOKIE:-false}
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+      N8N_TEMPLATES_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "true"
+      N8N_RESTRICT_FILE_ACCESS_TO: /opt/plx/backups
+      N8N_RUNNERS_MODE: internal
+      N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 0.0.0.0
+      N8N_RUNNERS_AUTH_TOKEN: ${INTERNAL_TOKEN:?Configure INTERNAL_TOKEN}
+      N8N_RUNNERS_TASK_REQUEST_TIMEOUT: "180"
+      N8N_RUNNERS_TASK_TIMEOUT: "600"
+      N8N_RUNNERS_GRANT_TOKEN_TTL: "600"
+      N8N_UNVERIFIED_PACKAGES_ENABLED: "false"
+      N8N_COMMUNITY_PACKAGES_ENABLED: "false"
+      N8N_PUBLIC_API_DISABLED: ${N8N_PUBLIC_API_DISABLED:-true}
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: "336"
+      EXECUTIONS_DATA_SAVE_ON_SUCCESS: all
+      EXECUTIONS_DATA_SAVE_ON_ERROR: all
+      GENERIC_TIMEZONE: ${TZ:-America/Sao_Paulo}
+      TZ: ${TZ:-America/Sao_Paulo}
+      NODE_OPTIONS: --max-old-space-size=896
+      N8N_CONCURRENCY_PRODUCTION_LIMIT: "2"
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      WAHA_API_KEY: ${WAHA_API_KEY:?Configure WAHA_API_KEY}
+      PLX_ALLOWED_GROUP_ID: ${PLX_ALLOWED_GROUP_ID:?Configure PLX_ALLOWED_GROUP_ID}
+      PLX_DRIVE_ROOT_FOLDER_ID: ${PLX_DRIVE_ROOT_FOLDER_ID:?Configure PLX_DRIVE_ROOT_FOLDER_ID}
+      PLX_MANIFEST_TABLE_ID: ${PLX_MANIFEST_TABLE_ID:-{{N8N_DATA_TABLE_ID}}}
+      PLX_ISSUERS_TABLE_ID: ${PLX_ISSUERS_TABLE_ID:-dpYTL4WQMOWrpc0H}
+      PLX_BENCHMARK_TABLE_ID: ${PLX_BENCHMARK_TABLE_ID:-IVpafEYuvb0zue1l}
+      PLX_GOOGLE_CREDENTIAL_ID: ${PLX_GOOGLE_CREDENTIAL_ID:-x28epy954tCGyrFD}
+      WAHA_SESSION: ${WAHA_SESSION:-plx-documentos}
+      WHATSAPP_SEND_ENABLED: ${WHATSAPP_SEND_ENABLED:-false}
+      BOOTSTRAP_DIR: /opt/plx
+    ports:
+      - 127.0.0.1:5679:5678
+    volumes:
+      - n8n-data:/home/node/.n8n
+      - ./bootstrap:/opt/plx/bootstrap:ro
+      - ./workflows:/opt/plx/workflows:ro
+      - ./backups:/opt/plx/backups:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    mem_limit: 1152m
+    cpus: 1.5
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:5678/healthz/readiness').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 20s
+      timeout: 5s
+      retries: 30
+      start_period: 90s
+
+  task-runners:
+    image: n8nio/runners:2.41.6
+    environment:
+      N8N_RUNNERS_TASK_BROKER_URI: http://n8n:5679
+      N8N_RUNNERS_AUTH_TOKEN: ${INTERNAL_TOKEN}
+      GENERIC_TIMEZONE: ${TZ:-America/Sao_Paulo}
+      NODE_OPTIONS: --localstorage-file=/tmp/n8n-runner-localstorage
+    depends_on:
+      n8n:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    mem_limit: 320m
+    cpus: 0.75
+    security_opt: [no-new-privileges:true]
+
+  document-ai-gateway:
+    build: ./document-reader
+    environment:
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:?Configure NVIDIA_API_KEY}
+      PORT: "8080"
+      MAX_BODY_BYTES: "26214400"
+      MAX_PDF_PAGES: "20"
+      MAX_PDF_IMAGE_DIMENSION: "1800"
+      LOCAL_OCR_MIN_SCORE: "8"
+      NVIDIA_OCR_ENABLED: "true"
+      REINFORCEMENT_MODEL: "nvidia/nemotron-3-super-120b-a12b"
+      UPSTREAM_TIMEOUT_MS: "180000"
+    restart: unless-stopped
+    init: true
+    mem_limit: 448m
+    cpus: 1
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, wget, -qO-, http://127.0.0.1:8080/health]
+      interval: 15s
+      timeout: 4s
+      retries: 8
+      start_period: 15s
+
+  plx-ingress-queue:
+    build: ./plx-ingress-queue
+    environment:
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      N8N_ENDPOINT: http://n8n:5678/webhook/plx-v35-process-queue
+      RETRY_BASE_SECONDS: ${PLX_QUEUE_RETRY_BASE_SECONDS:-5}
+      MAX_ATTEMPTS: ${PLX_QUEUE_MAX_ATTEMPTS:-5}
+      QUEUE_DB: /data/plx-ingress.sqlite3
+    volumes:
+      - queue-data:/data
+    depends_on:
+      n8n:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    mem_limit: 192m
+    cpus: 0.5
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD-SHELL, "wget -qO- http://127.0.0.1:8090/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  waha:
+    # Contingencia legada. O runtime normal usa o WAHA central do VPS,
+    # conectado a esta rede com o alias interno `waha`.
+    profiles: [legacy-waha]
+    image: devlikeapro/waha@sha256:f3c33e8e70a78eb37af4f4e2eb655849d42d8ffdc4b8254f9de38069e906a146
+    platform: linux/amd64
+    environment:
+      WAHA_API_KEY: ${WAHA_API_KEY}
+      WAHA_DASHBOARD_ENABLED: "true"
+      WAHA_DASHBOARD_USERNAME: ${WAHA_DASHBOARD_USERNAME:-admin}
+      WAHA_DASHBOARD_PASSWORD: ${WAHA_DASHBOARD_PASSWORD:?Configure WAHA_DASHBOARD_PASSWORD}
+      WHATSAPP_SWAGGER_USERNAME: ${WHATSAPP_SWAGGER_USERNAME:-admin}
+      WHATSAPP_SWAGGER_PASSWORD: ${WHATSAPP_SWAGGER_PASSWORD:?Configure WHATSAPP_SWAGGER_PASSWORD}
+      WAHA_PRINT_QR: "false"
+      WAHA_BASE_URL: http://waha:3000
+      WAHA_PUBLIC_URL: http://127.0.0.1:3006
+      WHATSAPP_DEFAULT_ENGINE: GOWS
+      WAHA_WORKER_CONCURRENCY: "1"
+      NODE_OPTIONS: --max-old-space-size=512
+      WHATSAPP_FILES_FOLDER: /app/.media
+      WHATSAPP_FILES_LIFETIME: "604800"
+      WAHA_EVENTS_DOWNLOAD_MEDIA: "true"
+      WAHA_EVENTS_DOWNLOAD_MEDIA_MIMETYPES: application/pdf,application/xml,text/xml,image
+      WHATSAPP_HOOK_URL: http://n8n:5678/webhook/plx-v35-waha-ingress
+      WHATSAPP_HOOK_EVENTS: message
+      WHATSAPP_HOOK_RETRIES_POLICY: exponential
+      WHATSAPP_HOOK_RETRIES_DELAY_SECONDS: "2"
+      WHATSAPP_HOOK_RETRIES_ATTEMPTS: "8"
+      WHATSAPP_HOOK_CUSTOM_HEADERS: X-Internal-Token:${INTERNAL_TOKEN}
+      TZ: ${TZ:-America/Sao_Paulo}
+    ports:
+      - 127.0.0.1:3006:3000
+    volumes:
+      - waha-sessions:/app/.sessions
+      - waha-media:/app/.media
+    restart: unless-stopped
+    init: true
+    mem_limit: 768m
+    cpus: 1.5
+    security_opt: [no-new-privileges:true]
+
+volumes:
+  postgres-data:
+  n8n-data:
+  queue-data:
+  waha-sessions:
+  waha-media:

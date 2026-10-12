@@ -1,0 +1,9 @@
+{
+  "group_id": "<grupo-waha>@g.us",
+  "archive_owner_name": "<razao-social-da-empresa-arquivista>",
+  "archive_owner_cnpj": "<cnpj-sem-formatacao>",
+  "archive_mode": "mixed",
+  "drive_root_id": "<id-da-pasta-raiz-exclusiva>",
+  "review_destination": "99 - Revisar",
+  "active": true
+}

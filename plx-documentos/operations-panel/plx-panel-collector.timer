@@ -1,0 +1,11 @@
+[Unit]
+Description=Collect PLX operational evidence every 15 seconds after completion
+
+[Timer]
+OnBootSec=20
+OnUnitInactiveSec=15
+AccuracySec=1
+Unit=plx-panel-collector.service
+
+[Install]
+WantedBy=timers.target

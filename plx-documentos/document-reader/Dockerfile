@@ -10,6 +10,7 @@ RUN apk add --no-cache \
 
 WORKDIR /app
 COPY server.mjs /app/server.mjs
+COPY lib /app/lib
 
 USER node
 EXPOSE 8080

@@ -3,6 +3,8 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { logger } = require('../lib/logger.js');
+const { defaultMetrics } = require('../lib/metrics.js');
 
 function asEntries(value) {
   if (Array.isArray(value)) return value;
@@ -74,6 +76,12 @@ function runCli(argv = process.argv.slice(2)) {
   const driveSimulation = JSON.parse(fs.readFileSync(path.resolve(args['drive-sim']), 'utf8'));
   const result = reconcile(manifest, driveSimulation);
   fs.writeFileSync(path.resolve(args.out), `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
+  defaultMetrics.increment('reconciliation_discrepancies_total', result.discrepancies_total);
+  logger({ module: 'reconciler', level: result.ok ? 'info' : 'warn', message: 'reconciliation_completed', meta: {
+    checked_total: result.checked_total,
+    discrepancies_total: result.discrepancies_total,
+    output_path: path.resolve(args.out),
+  } });
   return result.ok ? 0 : 2;
 }
 
@@ -81,7 +89,7 @@ if (require.main === module) {
   try {
     process.exitCode = runCli();
   } catch (error) {
-    console.error(JSON.stringify({ level: 'error', module: 'reconciler', error: String(error?.message || 'reconciliation_failed') }));
+    logger({ module: 'reconciler', level: 'error', message: 'reconciliation_failed', meta: { error: String(error?.message || 'reconciliation_failed') } });
     process.exitCode = 1;
   }
 }

@@ -248,6 +248,25 @@ function createPolicyResolver({ policies = [] } = {}) {
   });
 }
 
+function logDecision(policy, ingress, document, result) {
+  return {
+    module: 'policy-resolver',
+    event: 'archive_policy_decision',
+    policy_version: result?.policy_version ?? policy?.policy_version ?? null,
+    decision: result?.decision ?? (result?.policy ? 'POLICY_SELECTED' : 'POLICY_REJECTED'),
+    decision_reason: result?.decision_reason ?? null,
+    decision_log: Array.isArray(result?.decision_log) ? [...result.decision_log] : [],
+    tenant_id: ingress?.tenant_id ?? policy?.tenant_id ?? null,
+    operation_id: ingress?.operation_id ?? policy?.operation_id ?? null,
+    session_id: ingress?.session_id ?? policy?.session_id ?? null,
+    group_id: ingress?.group_id ?? policy?.group_id ?? null,
+    correlation_id: document?.correlation_id ?? null,
+    document_hash: document?.document_hash ?? document?.sha256 ?? null,
+    archive_owner_id: result?.archive_owner?.owner_id ?? null,
+    archive_direction: result?.archive_direction ?? null,
+  };
+}
+
 module.exports = {
   ARCHIVE_MODES,
   GROUP_MODES,
@@ -258,4 +277,5 @@ module.exports = {
   resolvePolicyForIngress,
   resolveArchivePolicy,
   createPolicyResolver,
+  logDecision,
 };

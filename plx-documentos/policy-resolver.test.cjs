@@ -9,6 +9,7 @@ const {
   resolvePolicyForIngress,
   validatePolicy,
   createPolicyResolver,
+  logDecision,
 } = require('./policy-resolver.cjs');
 
 const ingress = Object.freeze({
@@ -177,6 +178,17 @@ assert.deepEqual(validatePolicy(policy), []);
   assert.equal(selected.policy, policy);
   assert.equal(selected.policy_version, 7);
   assert.equal(selected.decision_reason, 'POLICY_SCOPE_EXACT');
+}
+
+{
+  const result = resolve({ recipient: { name: 'Empresa A Comércio' } });
+  const entry = logDecision(policy, ingress, { correlation_id: 'tenant:group:message', sha256: 'abc' }, result);
+  assert.equal(entry.event, 'archive_policy_decision');
+  assert.equal(entry.policy_version, 7);
+  assert.equal(entry.decision_reason, 'APPROVED_ALIAS_EXACT');
+  assert.equal(entry.correlation_id, 'tenant:group:message');
+  assert.equal(entry.document_hash, 'abc');
+  assert.equal(entry.archive_owner_id, 'empresa-a');
 }
 
 {

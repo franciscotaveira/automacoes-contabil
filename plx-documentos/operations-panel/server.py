@@ -74,6 +74,22 @@ def client_summaries(documents):
     return sorted(result, key=lambda x: x['name'].casefold())
 
 
+def metrics_snapshot(documents):
+    """Counters derived from the latest durable snapshot; no delivery is inferred."""
+    return {
+        'document_received_total': len(documents),
+        'document_archived_total': sum(bool(d.get('drive_file_id')) for d in documents),
+        'reinforcement_failures_total': sum(
+            'REINFORCEMENT' in str(d.get('review_reason', '')).upper()
+            or 'REINFORCEMENT' in str(d.get('last_error', '')).upper()
+            for d in documents
+        ),
+        'reconciliation_discrepancies_total': sum(
+            d.get('integrity') not in (None, 'VERIFICADA') for d in documents
+        ),
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def reply(self, status, value, mime='application/json; charset=utf-8', challenge=False):
         payload = json.dumps(value, ensure_ascii=False).encode() if isinstance(value, (dict, list)) else value
@@ -129,6 +145,8 @@ class Handler(BaseHTTPRequestHandler):
             docs = [d for d in docs if d.get('tenant_id') == requested_tenant]
         # The legacy source is exclusively PLX. An unknown tenant receives no source-level data.
         plx = 'plx' in user.get('tenants', [])
+        if path.path == '/api/metrics':
+            return self.reply(200, {**metadata, 'metrics': metrics_snapshot(docs)})
         if path.path == '/api/overview':
             stages, attention = operational_summary(docs, snapshot['executions'] if plx else [])
             return self.reply(200, {**metadata, 'office': 'PLX Contabilidade' if plx else 'Sem escritório vinculado',

@@ -1,5 +1,6 @@
 import http from 'node:http';
 import { execFile } from 'node:child_process';
+import { timingSafeEqual } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -7,10 +8,12 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import docstoreModule from './lib/docstore.cjs';
 import loggerModule from './lib/logger.cjs';
+import metricsModule from './lib/metrics.cjs';
 
 const execFileAsync = promisify(execFile);
 const { defaultDocStore } = docstoreModule;
 const { createLogger } = loggerModule;
+const { defaultMetrics } = metricsModule;
 const logger = createLogger('document-reader');
 
 export const READER_VERSION = 'hybrid-v3.2.0';
@@ -513,6 +516,7 @@ export async function extractDocument(payload, { docstore = defaultDocStore } = 
   let documentRecord = null;
   if (correlationId) {
     try {
+      const existing = typeof docstore.getDocument === 'function' ? docstore.getDocument(correlationId) : null;
       docstore.ensureDocument(correlationId, {
         tenant_id: payload.tenant_id,
         operation_id: payload.operation_id,
@@ -525,6 +529,7 @@ export async function extractDocument(payload, { docstore = defaultDocStore } = 
       documentRecord = docstore.updateState(correlationId, 'SOURCE_STORED', {
         document_hash: compact(payload.document_hash || payload.sha256) || null,
       });
+      if (!existing) defaultMetrics.increment('document_received_total');
     } catch (error) {
       logger.warn('docstore_update_failed', {
         correlation_id: correlationId,
@@ -534,7 +539,21 @@ export async function extractDocument(payload, { docstore = defaultDocStore } = 
     }
   }
 
-  const result = await extractDocumentCore(payload);
+  let result;
+  try {
+    result = await extractDocumentCore(payload);
+  } catch (error) {
+    if (correlationId) {
+      try {
+        documentRecord = docstore.updateState(correlationId, 'FAILED', {
+          metadata: { extraction_error: compact(error?.message || 'document_extraction_failed').slice(0, 160) },
+        });
+      } catch (stateError) {
+        logger.warn('docstore_failure_state_failed', { correlation_id: correlationId, error: compact(stateError?.message) });
+      }
+    }
+    throw error;
+  }
   const confidence = Number.isFinite(Number(result.mean_confidence))
     ? Number(result.mean_confidence)
     : (Number(result.local_quality?.score || 0) >= localOcrMinScore ? 1 : 0);
@@ -543,13 +562,24 @@ export async function extractDocument(payload, { docstore = defaultDocStore } = 
     || (result.fallback_used === true && confidence >= minReinforcementConfidence);
   const decisionReason = accepted ? 'LOCAL_EXTRACTION_ACCEPTED' : 'LOCAL_EXTRACTION_REQUIRES_REVIEW';
   const enriched = { ...result, confidence, decision_reason: decisionReason };
+  defaultMetrics.increment('document_extracted_total');
   if (!correlationId) return enriched;
+  try {
+    documentRecord = docstore.updateState(correlationId, 'EXTRACTED', {
+      metadata: { extraction_route: result.route, extraction_confidence: confidence, extraction_decision: decisionReason },
+    });
+  } catch (error) {
+    logger.warn('docstore_extracted_state_failed', { correlation_id: correlationId, error: compact(error?.message) });
+    if (strictMode) throw error;
+  }
   return {
     ...enriched,
     metadata: {
       ...(result.metadata || {}),
       correlation_id: correlationId,
-      document_state: documentRecord?.state || 'SOURCE_STORED',
+      document_state: documentRecord?.state || 'EXTRACTED',
+      decision_reason: decisionReason,
+      evidence_used: [result.route, ...(result.signals?.valid_access_keys || []), ...(result.signals?.cnpjs || [])].filter(Boolean),
     },
   };
 }
@@ -603,15 +633,59 @@ export function parseGuidedResponse(response) {
 
 export async function reinforceDocument(payload, dependencies = {}) {
   const startedAt = Date.now();
-  const extractDocumentFn = dependencies.extractDocumentFn || extractDocument;
+  const docstore = dependencies.docstore || defaultDocStore;
+  const extractDocumentFn = dependencies.extractDocumentFn || ((input) => extractDocument(input, { docstore }));
   const postJsonFn = dependencies.postJsonFn || postJson;
   const confidenceThreshold = Number(dependencies.minReinforcementConfidence ?? minReinforcementConfidence);
   const enforceConfidence = dependencies.enforceConfidence ?? strictMode;
   const correlationId = compact(payload?.correlation_id);
-  const withMetadata = (document) => correlationId ? {
-    ...document,
-    metadata: { ...(document.metadata || {}), correlation_id: correlationId },
-  } : document;
+  const withMetadata = (document) => {
+    if (!correlationId) return document;
+    let documentState = typeof docstore.getDocument === 'function' ? docstore.getDocument(correlationId)?.state : null;
+    const targetState = document.reinforcement_status === 'RESOLVED' ? 'CLASSIFIED'
+      : (['FAILED', 'UNRESOLVED'].includes(document.reinforcement_status) ? 'REVIEW_REQUIRED' : null);
+    try {
+      docstore.ensureDocument(correlationId, {
+        tenant_id: payload.tenant_id,
+        operation_id: payload.operation_id,
+        session_id: payload.session_id || payload.session,
+        group_id: payload.group_id,
+        message_id: payload.message_id,
+        document_hash: payload.document_hash || payload.sha256,
+        policy_version: payload.policy_version,
+      });
+      documentState = typeof docstore.getDocument === 'function' ? docstore.getDocument(correlationId)?.state : documentState;
+      if (targetState === 'CLASSIFIED') {
+        if (documentState === 'RECEIVED') documentState = docstore.updateState(correlationId, 'SOURCE_STORED').state;
+        if (documentState === 'SOURCE_STORED') documentState = docstore.updateState(correlationId, 'EXTRACTED').state;
+        if (documentState === 'EXTRACTED') documentState = docstore.updateState(correlationId, 'CLASSIFIED').state;
+      } else if (targetState && documentState !== targetState) {
+        documentState = docstore.updateState(correlationId, targetState).state;
+      }
+    } catch (error) {
+      logger.warn('docstore_reinforcement_state_failed', { correlation_id: correlationId, error: compact(error?.message) });
+      if (strictMode) throw error;
+    }
+    const evidenceUsed = unique([
+      document.evidence?.type,
+      document.evidence?.company,
+      document.evidence?.date,
+      document.access_key,
+      document.issuer_cnpj,
+    ]);
+    return {
+      ...document,
+      metadata: {
+        ...(document.metadata || {}),
+        correlation_id: correlationId,
+        document_state: documentState,
+        reinforcement_accepted: Boolean(document.reinforcement_accepted),
+        reinforcement_confidence: Number(document.reinforcement_confidence || 0),
+        decision_reason: document.decision_reason || null,
+        evidence_used: evidenceUsed,
+      },
+    };
+  };
   const original = applyDocumentReviewPolicy(payload.current && typeof payload.current === 'object' ? payload.current : {});
   if (!original.reinforcement_required) {
     const elapsed = Date.now() - startedAt;
@@ -766,6 +840,7 @@ export async function reinforceDocument(payload, dependencies = {}) {
   } catch (error) {
     const elapsed = Date.now() - startedAt;
     lastReinforcementMs = elapsed;
+    defaultMetrics.increment('reinforcement_failures_total');
     return withMetadata({
       ...original,
       warnings: unique([...(Array.isArray(original.warnings) ? original.warnings : []), 'AI_REINFORCEMENT_FAILED']),
@@ -788,6 +863,21 @@ function json(res, status, body) {
   res.end(payload);
 }
 
+function constantTimeEquals(left, right) {
+  const a = Buffer.from(String(left || ''));
+  const b = Buffer.from(String(right || ''));
+  return a.length === b.length && a.length > 0 && timingSafeEqual(a, b);
+}
+
+function metricsAuthorized(req) {
+  const configured = String(process.env.METRICS_SHARED_KEY || '').trim();
+  if (!configured || configured === 'CHANGE_ME') return { configured: false, authorized: false };
+  const authorization = String(req.headers.authorization || '');
+  const bearer = authorization.toLowerCase().startsWith('bearer ') ? authorization.slice(7).trim() : '';
+  const supplied = String(req.headers['x-metrics-key'] || bearer).trim();
+  return { configured: true, authorized: constantTimeEquals(supplied, configured) };
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -808,6 +898,12 @@ function readBody(req) {
 
 export function createServer() {
   return http.createServer(async (req, res) => {
+    if (req.method === 'GET' && req.url === '/metrics') {
+      const auth = metricsAuthorized(req);
+      if (!auth.configured) return json(res, 503, { error: 'metrics_key_not_configured' });
+      if (!auth.authorized) return json(res, 401, { error: 'metrics_unauthorized' });
+      return json(res, 200, { reader_version: READER_VERSION, metrics: defaultMetrics.snapshot() });
+    }
     if (req.method === 'GET' && req.url === '/health') {
       return json(res, 200, {
         ok: true,

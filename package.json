@@ -5,7 +5,8 @@
   "description": "Controlled production hardening for the PLX document automation pipeline",
   "scripts": {
     "lint": "eslint plx-documentos --ext .js,.cjs,.mjs",
-    "test:node": "node --test plx-documentos/lib/docstore.test.cjs plx-documentos/lib/docstore.test.mjs plx-documentos/metrics/metrics.test.mjs plx-documentos/policy-resolver.test.cjs plx-documentos/document-reader/server.test.mjs plx-documentos/reconciler/test_reconcile.js plx-documentos/workflow-hardening.test.cjs plx-documentos/daily-report-v35.test.cjs plx-documentos/daily-close-v35.workflow.test.cjs plx-documentos/unified-v35.workflow.test.cjs",
+    "test:node": "node --test plx-documentos/lib/docstore.test.cjs plx-documentos/lib/docstore.test.mjs plx-documentos/metrics/metrics.test.mjs plx-documentos/policy-resolver.test.cjs plx-documentos/document-reader/server.test.mjs plx-documentos/reconciler/test_reconcile.js plx-documentos/integrations/erp/adapters.test.cjs plx-documentos/tools/mask-logs.test.cjs plx-documentos/workflow-hardening.test.cjs plx-documentos/workflows/templates.test.cjs plx-documentos/daily-report-v35.test.cjs plx-documentos/daily-close-v35.workflow.test.cjs plx-documentos/unified-v35.workflow.test.cjs",
+    "security:scan": "node plx-documentos/tools/scan-secrets.js",
     "test": "npm run test:node"
   },
   "devDependencies": {

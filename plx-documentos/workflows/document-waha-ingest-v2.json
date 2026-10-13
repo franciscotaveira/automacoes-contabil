@@ -1,0 +1,492 @@
+{
+  "id": "documentWahaIngestV2",
+  "name": "DOCUMENTOS · Pack 01 · Captura WAHA V2",
+  "description": "Template inativo: persiste a ocorrência, extrai, resolve política e encaminha para Drive ou revisão.",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Sao_Paulo",
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all"
+  },
+  "nodes": [
+    {
+      "id": "webhook",
+      "name": "WAHA · Receber documento",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        240
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "document-waha-ingest-v2",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "CONFIGURE_WAHA_WEBHOOK_AUTH_ID",
+          "name": "CONFIGURE · WAHA webhook"
+        }
+      }
+    },
+    {
+      "id": "validate",
+      "name": "Validar escopo e correlação",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        240
+      ],
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body ?? $input.first().json;\nconst message = body.payload?.payload ?? body.payload ?? body;\nconst tenantId = String(body.tenant_id ?? 'CONFIGURE_TENANT_ID').trim();\nconst operationId = String(body.operation_id ?? 'CONFIGURE_OPERATION_ID').trim();\nconst groupId = String(message.from ?? message.chatId ?? '').trim();\nconst messageId = String(message.id ?? message.key?.id ?? '').trim();\nconst media = message.media ?? {};\nif (!tenantId || tenantId.startsWith('CONFIGURE_')) throw new Error('TENANT_ID_REQUIRED');\nif (!operationId || operationId.startsWith('CONFIGURE_')) throw new Error('OPERATION_ID_REQUIRED');\nif (!groupId.endsWith('@g.us')) throw new Error('AUTHORIZED_GROUP_REQUIRED');\nif (!messageId) throw new Error('MESSAGE_ID_REQUIRED');\nconst correlationId = [tenantId, groupId, messageId].join(':');\nreturn [{ json: { tenant_id: tenantId, operation_id: operationId, session_id: String(body.session ?? ''),\n  group_id: groupId, message_id: messageId, correlation_id: correlationId, idempotency_key: correlationId,\n  media_url: String(media.url ?? message.mediaUrl ?? ''), mime_type: String(media.mimetype ?? message.mimeType ?? ''),\n  original_filename: String(media.filename ?? message.filename ?? ('documento-' + messageId)),\n  received_at: new Date().toISOString(), state: 'RECEIVED' } }];"
+      }
+    },
+    {
+      "id": "persist-received",
+      "name": "Persistir RECEIVED antes do ACK",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        480,
+        240
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "documentos_contabeis_manifesto"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "correlation_id": "={{ $json.correlation_id }}",
+            "idempotency_key": "={{ $json.idempotency_key }}",
+            "tenant_id": "={{ $json.tenant_id }}",
+            "group_id": "={{ $json.group_id }}",
+            "message_id": "={{ $json.message_id }}",
+            "status": "RECEIVED",
+            "received_at": "={{ $json.received_at }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        }
+      }
+    },
+    {
+      "id": "ack",
+      "name": "Confirmar persistência ao WAHA",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        720,
+        100
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { accepted:true, persisted:true, correlation_id:$json.correlation_id } }}",
+        "options": {
+          "responseCode": 202
+        }
+      }
+    },
+    {
+      "id": "download",
+      "name": "WAHA · Baixar mídia",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        720,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.media_url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "data"
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "CONFIGURE_WAHA_API_AUTH_ID",
+          "name": "CONFIGURE · WAHA API"
+        }
+      }
+    },
+    {
+      "id": "base64",
+      "name": "Preparar payload do reader",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        300
+      ],
+      "parameters": {
+        "jsCode": "const meta = $('Validar escopo e correlação').first().json;\nconst binary = $input.first().binary?.data;\nif (!binary?.data) throw new Error('DOCUMENT_BINARY_REQUIRED');\nreturn [{ json: { ...meta, document_base64: 'data:' + (binary.mimeType || meta.mime_type) + ';base64,' + binary.data,\n  mime_type: binary.mimeType || meta.mime_type, filename: binary.fileName || meta.original_filename }, binary: { data: binary } }];"
+      }
+    },
+    {
+      "id": "extract",
+      "name": "Reader · Extrair documento",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1200,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.DOCUMENT_READER_URL + \"/v1/document/extract\" }}",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 180000
+        }
+      }
+    },
+    {
+      "id": "wait",
+      "name": "Aguardar consistência antes da política",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1440,
+        300
+      ],
+      "parameters": {
+        "amount": 2,
+        "unit": "seconds"
+      }
+    },
+    {
+      "id": "policy",
+      "name": "Policy · Resolver autorização",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1680,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.POLICY_RESOLVER_URL + \"/v1/policy/resolve\" }}",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ ingress:$(\"Validar escopo e correlação\").first().json, document:$json, correlation_id:$(\"Validar escopo e correlação\").first().json.correlation_id }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "authorized",
+      "name": "Arquivo autorizado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1920,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.archive_authorized }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "drive",
+      "name": "Drive · Arquivar documento autorizado",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        2160,
+        180
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "file",
+        "operation": "upload",
+        "inputDataFieldName": "data",
+        "name": "={{ $(\"Preparar payload do reader\").first().json.filename }}",
+        "driveId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "CONFIGURE_DRIVE_ROOT_FOLDER_ID"
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "CONFIGURE_GOOGLE_DRIVE_CREDENTIAL_ID",
+          "name": "CONFIGURE · Google Drive"
+        }
+      }
+    },
+    {
+      "id": "review",
+      "name": "Registrar REVIEW_REQUIRED",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2160,
+        420
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "documentos_contabeis_manifesto"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "correlation_id",
+              "condition": "eq",
+              "keyValue": "={{ $(\"Validar escopo e correlação\").first().json.correlation_id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "REVIEW_REQUIRED",
+            "review_required": true,
+            "review_reason": "={{ $json.decision_reason ?? \"POLICY_REVIEW_REQUIRED\" }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        }
+      }
+    },
+    {
+      "id": "archived",
+      "name": "Registrar ARCHIVED",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2400,
+        180
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "documentos_contabeis_manifesto"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "correlation_id",
+              "condition": "eq",
+              "keyValue": "={{ $(\"Validar escopo e correlação\").first().json.correlation_id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "ARCHIVED",
+            "drive_file_id": "={{ $json.id ?? \"\" }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        }
+      }
+    },
+    {
+      "id": "note",
+      "name": "README · Credenciais e tabelas",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -80
+      ],
+      "parameters": {
+        "content": "## Pack 01 · Captura WAHA V2\nCredenciais: header do webhook, WAHA API e Google Drive. Env: DOCUMENT_READER_URL e POLICY_RESOLVER_URL.\nData Table documentos_contabeis_manifesto: correlation_id (único), idempotency_key, tenant_id, group_id, message_id, status, received_at, review_required, review_reason, drive_file_id.",
+        "width": 1180,
+        "height": 220,
+        "color": 5
+      }
+    }
+  ],
+  "connections": {
+    "WAHA · Receber documento": {
+      "main": [
+        [
+          {
+            "node": "Validar escopo e correlação",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar escopo e correlação": {
+      "main": [
+        [
+          {
+            "node": "Persistir RECEIVED antes do ACK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Persistir RECEIVED antes do ACK": {
+      "main": [
+        [
+          {
+            "node": "Confirmar persistência ao WAHA",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "WAHA · Baixar mídia",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WAHA · Baixar mídia": {
+      "main": [
+        [
+          {
+            "node": "Preparar payload do reader",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar payload do reader": {
+      "main": [
+        [
+          {
+            "node": "Reader · Extrair documento",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reader · Extrair documento": {
+      "main": [
+        [
+          {
+            "node": "Aguardar consistência antes da política",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aguardar consistência antes da política": {
+      "main": [
+        [
+          {
+            "node": "Policy · Resolver autorização",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Policy · Resolver autorização": {
+      "main": [
+        [
+          {
+            "node": "Arquivo autorizado?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Arquivo autorizado?": {
+      "main": [
+        [
+          {
+            "node": "Drive · Arquivar documento autorizado",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Registrar REVIEW_REQUIRED",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Drive · Arquivar documento autorizado": {
+      "main": [
+        [
+          {
+            "node": "Registrar ARCHIVED",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

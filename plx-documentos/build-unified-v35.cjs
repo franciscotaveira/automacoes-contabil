@@ -53,6 +53,23 @@ normalize.parameters.jsCode = normalize.parameters.jsCode.replace(
   "const mediaUrlText = String(mediaUrl);\nconst authorityMatch = /^([a-z][a-z0-9+.-]*):\\/\\/([^\\/?#]+)(?:[\\/?#]|$)/i.exec(mediaUrlText);\nconst mediaUrlAllowed = Boolean(authorityMatch && authorityMatch[1].toLowerCase() === 'http' && authorityMatch[2].toLowerCase() === 'waha:3000');",
 );
 if (normalize.parameters.jsCode.includes('new URL(')) throw new Error('WAHA_URL_VALIDATOR_NOT_REWRITTEN');
+normalize.parameters.jsCode = normalize.parameters.jsCode
+  .replace(
+    "const isGroup = String(groupId).endsWith('@g.us');",
+    "const isGroup = String(groupId).endsWith('@g.us');\nconst hasMessageId = Boolean(String(messageId).trim());\nconst tenantId = String(body.tenant_id ?? 'plx').trim();\nconst correlationId = hasMessageId ? [tenantId, groupId, String(messageId)].join(':') : '';",
+  )
+  .replace(
+    'const accepted = isMessageEvent && isGroup',
+    'const accepted = hasMessageId && isMessageEvent && isGroup',
+  )
+  .replace(
+    "if (!isMessageEvent) reason = 'ignored_event';",
+    "if (!hasMessageId) reason = 'missing_message_id';\nelse if (!isMessageEvent) reason = 'ignored_event';",
+  )
+  .replace(
+    'accepted, reason, event_name: eventName, session:',
+    'accepted, reason, event_name: eventName, tenant_id: tenantId, correlation_id: correlationId, session:',
+  );
 const acknowledge = rename(byName(active, 'Confirmar recebimento técnico'), 'WAHA · Confirmar recebimento técnico', 'v35-ingress-ack', [480,-1020]);
 const accepted = rename(byName(active, 'Documento autorizado?'), 'WAHA · Documento autorizado?', 'v35-ingress-if', [720,-900]);
 const ignored = rename(byName(active, 'Evento ignorado sem resposta'), 'WAHA · Evento ignorado', 'v35-ingress-ignored', [960,-700]);
@@ -73,6 +90,8 @@ const merged = $input.first().json;
 const driveId = String(merged.id || merged.drive_file_id || '');
 if (!driveId) throw new Error('SOURCE_DRIVE_FILE_ID_MISSING');
 return [{ json: {
+  tenant_id: src.tenant_id,
+  correlation_id: src.correlation_id,
   source_file_id: driveId,
   source_filename: src.original_filename,
   mime_type: src.mime_type,
@@ -133,12 +152,52 @@ if (!messageDuplicateIf || !downloadSource || !manifestWrite || !existingConfirm
   throw new Error('CONTENT_DEDUP_DEPENDENCY_MISSING');
 }
 Object.assign(manifestWrite.parameters.columns.value, {
+  correlation_id:"={{ $('Concluir benchmark').item.json.correlation_id || $('Validar entrada e iniciar cronômetro').item.json.correlation_id || '' }}",
   issuer_name:"={{ $('Concluir benchmark').item.json.issuer_name || $('Concluir benchmark').item.json.issuer_name_canonical || '' }}",
   recipient_name:"={{ $('Concluir benchmark').item.json.recipient_name || '' }}",
   organized_filename:"={{ $('Concluir benchmark').item.json.organized_filename || '' }}",
   organized_path:"={{ $('Concluir benchmark').item.json.organized_path || $('Concluir benchmark').item.json.drive_path || '' }}",
   drive_web_url:"={{ $('Concluir benchmark').item.json.drive_web_url || '' }}",
 });
+
+const processingStart = workflow.nodes.find((node) => node.name === 'Validar entrada e iniciar cronômetro');
+processingStart.parameters.jsCode = processingStart.parameters.jsCode
+  .replace(
+    "const idempotencyKey = buildIdempotencyKey(body);",
+    "const idempotencyKey = buildIdempotencyKey(body);\nconst tenantId = String(body.tenant_id ?? 'plx').trim();\nconst correlationId = String(body.correlation_id ?? (body.group_id && body.message_id ? [tenantId, body.group_id, body.message_id].join(':') : '')).trim();",
+  )
+  .replace(
+    "if (!idempotencyKey) throw new Error('IDEMPOTENCY_KEY_REQUIRED');",
+    "if (!idempotencyKey) throw new Error('IDEMPOTENCY_KEY_REQUIRED');\nif (!correlationId) throw new Error('CORRELATION_ID_REQUIRED');",
+  )
+  .replace(
+    'benchmark_id:',
+    'tenant_id: tenantId,\n  correlation_id: correlationId,\n  benchmark_id:',
+  );
+
+const statusTable = structuredClone(manifestWrite.parameters.dataTableId);
+const statusReceived = {
+  id:'v35-status-received', name:'Status · RECEIVED', type:'n8n-nodes-base.dataTable', typeVersion:1.1,
+  position:[420,-900], parameters:{ resource:'row', operation:'insert', dataTableId:statusTable,
+    columns:{ mappingMode:'defineBelow', value:{ correlation_id:"={{ $('WAHA · Validar e normalizar').item.json.correlation_id }}", tenant_id:"={{ $('WAHA · Validar e normalizar').item.json.tenant_id }}", group_id:"={{ $('WAHA · Validar e normalizar').item.json.group_id }}", message_id:"={{ $('WAHA · Validar e normalizar').item.json.message_id }}", status:'RECEIVED', received_at:"={{ $('WAHA · Validar e normalizar').item.json.received_at }}" }, matchingColumns:[], schema:[] } },
+};
+const statusExtracted = {
+  id:'v35-status-extracted', name:'Status · EXTRACTED', type:'n8n-nodes-base.dataTable', typeVersion:1.1,
+  position:[2100,520], parameters:{ resource:'row', operation:'update', dataTableId:statusTable,
+    filters:{ conditions:[{ keyName:'correlation_id', condition:'eq', keyValue:"={{ $('Validar entrada e iniciar cronômetro').item.json.correlation_id }}" }] },
+    columns:{ mappingMode:'defineBelow', value:{ status:'EXTRACTED' }, matchingColumns:[], schema:[] } },
+};
+const statusArchived = {
+  id:'v35-status-archived', name:'Status · ARCHIVED', type:'n8n-nodes-base.dataTable', typeVersion:1.1,
+  position:[900,1040], parameters:{ resource:'row', operation:'update', dataTableId:statusTable,
+    filters:{ conditions:[{ keyName:'correlation_id', condition:'eq', keyValue:"={{ $('Concluir benchmark').item.json.correlation_id }}" }] },
+    columns:{ mappingMode:'defineBelow', value:{ status:"={{ $('Concluir benchmark').item.json.status || 'ARCHIVED' }}" }, matchingColumns:[], schema:[] } },
+};
+workflow.nodes.push(statusReceived, statusExtracted, statusArchived);
+workflow.connections[normalize.name] = { main: [[{ node:statusReceived.name, type:'main', index:0 }]] };
+workflow.connections[statusReceived.name] = { main: [[{ node:acknowledge.name, type:'main', index:0 }]] };
+workflow.connections['Extrair conteúdo no gateway híbrido'].main[0].push({ node:statusExtracted.name, type:'main', index:0 });
+workflow.connections[manifestWrite.name].main[0].push({ node:statusArchived.name, type:'main', index:0 });
 const contentLookup = {
   id:'v35-content-lookup', name:'Consultar documento pelo SHA-256', type:'n8n-nodes-base.dataTable', typeVersion:1.1,
   position:[1120,80], parameters:{

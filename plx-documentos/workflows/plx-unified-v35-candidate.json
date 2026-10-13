@@ -32,7 +32,7 @@
       },
       {
         "parameters": {
-          "jsCode": "const digitsOnly = (value) => String(value ?? '').replace(/\\D/g, '');\n\nconst isValidCnpj = (value) => {\n  const cnpj = digitsOnly(value);\n  if (cnpj.length !== 14 || /^(\\d)\\1{13}$/.test(cnpj)) return false;\n  const calculate = (length) => {\n    let sum = 0;\n    let weight = length - 7;\n    for (let index = 0; index < length; index += 1) {\n      sum += Number(cnpj[index]) * weight;\n      weight -= 1;\n      if (weight === 1) weight = 9;\n    }\n    const remainder = sum % 11;\n    return remainder < 2 ? 0 : 11 - remainder;\n  };\n  return calculate(12) === Number(cnpj[12]) && calculate(13) === Number(cnpj[13]);\n};\n\nconst inspectAccessKey = (value) => {\n  const key = digitsOnly(value);\n  const modelMap = { '55': 'nf-e', '65': 'nfc-e', '57': 'ct-e', '58': 'mdf-e' };\n  if (key.length !== 44) return { valid: false, key, model: '', document_type: '', issuer_cnpj: '', reason: 'ACCESS_KEY_LENGTH_INVALID' };\n  const model = key.slice(20, 22);\n  if (!modelMap[model]) return { valid: false, key, model, document_type: '', issuer_cnpj: key.slice(6, 20), reason: 'ACCESS_KEY_MODEL_UNSUPPORTED' };\n  let sum = 0;\n  let weight = 2;\n  for (let index = 42; index >= 0; index -= 1) {\n    sum += Number(key[index]) * weight;\n    weight = weight === 9 ? 2 : weight + 1;\n  }\n  const remainder = sum % 11;\n  const expected = remainder === 0 || remainder === 1 ? 0 : 11 - remainder;\n  if (expected !== Number(key[43])) return { valid: false, key, model, document_type: modelMap[model], issuer_cnpj: key.slice(6, 20), reason: 'ACCESS_KEY_CHECKSUM_INVALID' };\n  return { valid: true, key, model, document_type: modelMap[model], issuer_cnpj: key.slice(6, 20), reason: '' };\n};\n\nconst normalizeReferenceDate = (value) => {\n  const raw = String(value ?? '').trim();\n  let year = 0;\n  let month = 0;\n  let day = 0;\n  let normalized = '';\n  let match = raw.match(/^(\\d{4})-(\\d{2})-(\\d{2})$/);\n  if (match) {\n    year = Number(match[1]); month = Number(match[2]); day = Number(match[3]);\n    normalized = match[1] + '-' + match[2] + '-' + match[3];\n  } else {\n    match = raw.match(/^(\\d{2})\\/(\\d{2})\\/(\\d{4})$/);\n    if (!match) return '';\n    year = Number(match[3]); month = Number(match[2]); day = Number(match[1]);\n    normalized = match[3] + '-' + match[2] + '-' + match[1];\n  }\n  const date = new Date(Date.UTC(year, month - 1, day));\n  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return '';\n  return normalized;\n};\n\nconst buildIdempotencyKey = (input) => {\n  const groupId = String(input?.group_id ?? '').trim();\n  const messageId = String(input?.message_id ?? '').trim();\n  if (groupId && messageId) return 'waha:' + groupId + ':' + messageId;\n  const sourceFileId = String(input?.source_file_id ?? '').trim();\n  if (sourceFileId) return 'drive:' + sourceFileId;\n  return '';\n};\n\nconst reconcileOperationalLayout = (input) => {\n  const text = String(input.text ?? '').replace(/\\r/g, '');\n  const filename = String(input.filename ?? '');\n  const receiptByText = /comprovante\\s+(?:de\\s+)?pagamento/i.test(text)\n    || /pagamento\\s+(?:efetuado|realizado|conclu[ií]do)/i.test(text)\n    || (/comprovante/i.test(text) && (/\\bpix\\b/i.test(text) || /transa[cç][aã]o/i.test(text)))\n    || (/comprovante/i.test(text) && /comprovante/i.test(filename));\n  if (receiptByText) {\n    return { document_type: 'comprovante', department: 'contabil', warnings: ['TYPE_RECONCILED_FROM_PAYMENT_RECEIPT'] };\n  }\n  const fgtsCount = (text.match(/\\bFGTS\\b/gi) ?? []).length;\n  const fgtsByText = fgtsCount >= 2\n    || (/\\bFGTS\\b/i.test(text) && /fundo\\s+de\\s+garantia|guia[^\\n]{0,60}FGTS|FGTS\\s+digital|\\bGFD\\b/i.test(text));\n  if (fgtsByText) {\n    return { document_type: 'fgts', department: 'pessoal', warnings: ['TYPE_RECONCILED_FROM_FGTS_LAYOUT'] };\n  }\n  return { document_type: '', department: '', warnings: [] };\n};\n\nconst reconcileBoletoLayout = (input) => {\n  const text = String(input.text ?? '');\n  const compact = text.replace(/\\r/g, '');\n  const boletoMarkers = [\n    /ficha de compensa[cç][aã]o/i,\n    /linha digit[aá]vel/i,\n    /local de pagamento/i,\n    /nosso n[uú]mero/i,\n    /ag[eê]ncia\\s*\\/\\s*c[oó]d\\.?.*benefici[aá]rio/i,\n    /\\b\\d{5}\\.\\d{5}\\s+\\d{5}\\.\\d{6}\\s+\\d{5}\\.\\d{6}\\s+\\d\\s+\\d{14}\\b/,\n  ];\n  const markerCount = boletoMarkers.filter((pattern) => pattern.test(compact)).length;\n  if (markerCount < 2) return { is_boleto: false, issuer_name: '', issuer_cnpj: '', reference_date: '', due_date: '', document_number: '', recipient_name: '', warnings: [] };\n  const companyCnpj = digitsOnly(input.company_cnpj);\n  const signalCnpjs = Array.isArray(input.cnpjs) ? input.cnpjs.map(digitsOnly).filter(isValidCnpj) : [];\n  const issuerCnpj = signalCnpjs.find((cnpj) => cnpj !== companyCnpj) ?? '';\n  const beneficiaryMatch = compact.match(/Benefici[aá]rio[^\\n]*\\n\\s*([^\\n]{2,140}?)\\s+(\\d{14})\\b/i);\n  const issuerName = String(beneficiaryMatch?.[1] ?? '').replace(/\\s{2,}/g, ' ').trim();\n  const matchedCnpj = digitsOnly(beneficiaryMatch?.[2]);\n  const documentLine = compact.match(/Data do documento[^\\n]*N.?\\s*documento[^\\n]*\\n\\s*(\\d{2}\\/\\d{2}\\/\\d{4})\\s+([A-Za-z0-9._\\/-]+)/i);\n  const dueMatch = compact.match(/Vencimento[^\\n]*\\n[^\\n]*?(\\d{2}\\/\\d{2}\\/\\d{4})/i);\n  const payerMatch = compact.match(/Nome do pagador[^\\n]*\\n\\s*([^\\n]{2,140}?)(?:\\s{3,}|$)/i);\n  return {\n    is_boleto: true,\n    issuer_name: issuerName,\n    issuer_cnpj: isValidCnpj(matchedCnpj) && matchedCnpj !== companyCnpj ? matchedCnpj : issuerCnpj,\n    reference_date: String(documentLine?.[1] ?? ''),\n    due_date: String(dueMatch?.[1] ?? ''),\n    document_number: String(documentLine?.[2] ?? ''),\n    recipient_name: String(payerMatch?.[1] ?? '').replace(/\\s{2,}/g, ' ').trim(),\n    warnings: ['TYPE_RECONCILED_FROM_BOLETO_LAYOUT'],\n  };\n};\n\nconst reconcileFiscalIdentity = (input) => {\n  const accessKeyTypes = new Set(['nf-e','nfc-e','ct-e','mdf-e']);\n  const warnings = Array.isArray(input.warnings) ? input.warnings.map(String) : [];\n  const reviewReasons = [];\n  const rawCandidates = Array.isArray(input.access_key_candidates) ? input.access_key_candidates : [];\n  const candidates = [...new Set(rawCandidates.map(digitsOnly).filter(Boolean))];\n  const inspected = candidates.map(inspectAccessKey);\n  const valid = inspected.find((item) => item.valid);\n  let documentType = String(input.document_type ?? 'outro').toLowerCase();\n  let department = String(input.department ?? 'revisar').toLowerCase();\n  let issuerCnpj = digitsOnly(input.issuer_cnpj);\n  if (valid) {\n    if (documentType !== valid.document_type) warnings.push('TYPE_RECONCILED_FROM_ACCESS_KEY');\n    documentType = valid.document_type;\n    department = 'fiscal';\n    if (issuerCnpj && issuerCnpj !== valid.issuer_cnpj) warnings.push('ISSUER_CNPJ_RECONCILED_FROM_ACCESS_KEY');\n    issuerCnpj = valid.issuer_cnpj;\n  } else if (accessKeyTypes.has(documentType)) {\n    reviewReasons.push(candidates.length ? 'FISCAL_ACCESS_KEY_INVALID' : 'FISCAL_ACCESS_KEY_NOT_EVIDENCED');\n  }\n  if (issuerCnpj && !isValidCnpj(issuerCnpj)) reviewReasons.push('ISSUER_CNPJ_INVALID');\n  if (!issuerCnpj) reviewReasons.push('ISSUER_CNPJ_NOT_EVIDENCED');\n  return {\n    document_type: documentType,\n    department,\n    issuer_cnpj: isValidCnpj(issuerCnpj) ? issuerCnpj : '',\n    access_key: valid?.key ?? '',\n    access_key_model: valid?.model ?? '',\n    warnings: [...new Set(warnings)],\n    review_reasons: [...new Set(reviewReasons)],\n  };\n};\nconst request = $input.first().json;\nconst body = request.body ?? request;\nconst sourceFileId = String(body.source_file_id ?? '').trim();\nconst sourceFilename = String(body.source_filename ?? 'documento.pdf').trim();\nconst mimeType = String(body.mime_type ?? '').toLowerCase().trim();\nif (!sourceFileId) throw new Error('SOURCE_FILE_ID_REQUIRED');\nif (!['application/pdf','application/xml','text/xml','image/jpeg','image/png'].includes(mimeType)) throw new Error('UNSUPPORTED_MIME_TYPE');\nconst idempotencyKey = buildIdempotencyKey(body);\nif (!idempotencyKey) throw new Error('IDEMPOTENCY_KEY_REQUIRED');\nconst started = Date.now();\nreturn [{ json: {\n  benchmark_id: 'plx-v3-' + started + '-' + Math.random().toString(36).slice(2, 8),\n  source_file_id: sourceFileId,\n  source_filename: sourceFilename,\n  mime_type: mimeType,\n  idempotency_key: idempotencyKey,\n  group_id: String(body.group_id ?? '').trim(),\n  message_id: String(body.message_id ?? '').trim(),\n  sender_id: String(body.sender_id ?? '').trim(),\n  sha256: String(body.sha256 ?? '').trim().toLowerCase(),\n  received_at: String(body.received_at ?? new Date().toISOString()),\n  company_name: String(body.company_name ?? 'Giacomelli Transportes'),\n  company_legal_name: String(body.company_legal_name ?? 'Gilson Antonio Giacomelli Transportes Ltda'),\n  company_cnpj: String(body.company_cnpj ?? '09336455000157').replace(/\\D/g, ''),\n  started_at_ms: started,\n  started_at: new Date(started).toISOString(),\n  architecture_version: 'plx-shadow-v3.4.0',\n  model: 'nvidia/nemotron-3.5-lightning-30b-a3b'\n} }];"
+          "jsCode": "const digitsOnly = (value) => String(value ?? '').replace(/\\D/g, '');\n\nconst isValidCnpj = (value) => {\n  const cnpj = digitsOnly(value);\n  if (cnpj.length !== 14 || /^(\\d)\\1{13}$/.test(cnpj)) return false;\n  const calculate = (length) => {\n    let sum = 0;\n    let weight = length - 7;\n    for (let index = 0; index < length; index += 1) {\n      sum += Number(cnpj[index]) * weight;\n      weight -= 1;\n      if (weight === 1) weight = 9;\n    }\n    const remainder = sum % 11;\n    return remainder < 2 ? 0 : 11 - remainder;\n  };\n  return calculate(12) === Number(cnpj[12]) && calculate(13) === Number(cnpj[13]);\n};\n\nconst inspectAccessKey = (value) => {\n  const key = digitsOnly(value);\n  const modelMap = { '55': 'nf-e', '65': 'nfc-e', '57': 'ct-e', '58': 'mdf-e' };\n  if (key.length !== 44) return { valid: false, key, model: '', document_type: '', issuer_cnpj: '', reason: 'ACCESS_KEY_LENGTH_INVALID' };\n  const model = key.slice(20, 22);\n  if (!modelMap[model]) return { valid: false, key, model, document_type: '', issuer_cnpj: key.slice(6, 20), reason: 'ACCESS_KEY_MODEL_UNSUPPORTED' };\n  let sum = 0;\n  let weight = 2;\n  for (let index = 42; index >= 0; index -= 1) {\n    sum += Number(key[index]) * weight;\n    weight = weight === 9 ? 2 : weight + 1;\n  }\n  const remainder = sum % 11;\n  const expected = remainder === 0 || remainder === 1 ? 0 : 11 - remainder;\n  if (expected !== Number(key[43])) return { valid: false, key, model, document_type: modelMap[model], issuer_cnpj: key.slice(6, 20), reason: 'ACCESS_KEY_CHECKSUM_INVALID' };\n  return { valid: true, key, model, document_type: modelMap[model], issuer_cnpj: key.slice(6, 20), reason: '' };\n};\n\nconst normalizeReferenceDate = (value) => {\n  const raw = String(value ?? '').trim();\n  let year = 0;\n  let month = 0;\n  let day = 0;\n  let normalized = '';\n  let match = raw.match(/^(\\d{4})-(\\d{2})-(\\d{2})$/);\n  if (match) {\n    year = Number(match[1]); month = Number(match[2]); day = Number(match[3]);\n    normalized = match[1] + '-' + match[2] + '-' + match[3];\n  } else {\n    match = raw.match(/^(\\d{2})\\/(\\d{2})\\/(\\d{4})$/);\n    if (!match) return '';\n    year = Number(match[3]); month = Number(match[2]); day = Number(match[1]);\n    normalized = match[3] + '-' + match[2] + '-' + match[1];\n  }\n  const date = new Date(Date.UTC(year, month - 1, day));\n  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return '';\n  return normalized;\n};\n\nconst buildIdempotencyKey = (input) => {\n  const groupId = String(input?.group_id ?? '').trim();\n  const messageId = String(input?.message_id ?? '').trim();\n  if (groupId && messageId) return 'waha:' + groupId + ':' + messageId;\n  const sourceFileId = String(input?.source_file_id ?? '').trim();\n  if (sourceFileId) return 'drive:' + sourceFileId;\n  return '';\n};\n\nconst reconcileOperationalLayout = (input) => {\n  const text = String(input.text ?? '').replace(/\\r/g, '');\n  const filename = String(input.filename ?? '');\n  const receiptByText = /comprovante\\s+(?:de\\s+)?pagamento/i.test(text)\n    || /pagamento\\s+(?:efetuado|realizado|conclu[ií]do)/i.test(text)\n    || (/comprovante/i.test(text) && (/\\bpix\\b/i.test(text) || /transa[cç][aã]o/i.test(text)))\n    || (/comprovante/i.test(text) && /comprovante/i.test(filename));\n  if (receiptByText) {\n    return { document_type: 'comprovante', department: 'contabil', warnings: ['TYPE_RECONCILED_FROM_PAYMENT_RECEIPT'] };\n  }\n  const fgtsCount = (text.match(/\\bFGTS\\b/gi) ?? []).length;\n  const fgtsByText = fgtsCount >= 2\n    || (/\\bFGTS\\b/i.test(text) && /fundo\\s+de\\s+garantia|guia[^\\n]{0,60}FGTS|FGTS\\s+digital|\\bGFD\\b/i.test(text));\n  if (fgtsByText) {\n    return { document_type: 'fgts', department: 'pessoal', warnings: ['TYPE_RECONCILED_FROM_FGTS_LAYOUT'] };\n  }\n  return { document_type: '', department: '', warnings: [] };\n};\n\nconst reconcileBoletoLayout = (input) => {\n  const text = String(input.text ?? '');\n  const compact = text.replace(/\\r/g, '');\n  const boletoMarkers = [\n    /ficha de compensa[cç][aã]o/i,\n    /linha digit[aá]vel/i,\n    /local de pagamento/i,\n    /nosso n[uú]mero/i,\n    /ag[eê]ncia\\s*\\/\\s*c[oó]d\\.?.*benefici[aá]rio/i,\n    /\\b\\d{5}\\.\\d{5}\\s+\\d{5}\\.\\d{6}\\s+\\d{5}\\.\\d{6}\\s+\\d\\s+\\d{14}\\b/,\n  ];\n  const markerCount = boletoMarkers.filter((pattern) => pattern.test(compact)).length;\n  if (markerCount < 2) return { is_boleto: false, issuer_name: '', issuer_cnpj: '', reference_date: '', due_date: '', document_number: '', recipient_name: '', warnings: [] };\n  const companyCnpj = digitsOnly(input.company_cnpj);\n  const signalCnpjs = Array.isArray(input.cnpjs) ? input.cnpjs.map(digitsOnly).filter(isValidCnpj) : [];\n  const issuerCnpj = signalCnpjs.find((cnpj) => cnpj !== companyCnpj) ?? '';\n  const beneficiaryMatch = compact.match(/Benefici[aá]rio[^\\n]*\\n\\s*([^\\n]{2,140}?)\\s+(\\d{14})\\b/i);\n  const issuerName = String(beneficiaryMatch?.[1] ?? '').replace(/\\s{2,}/g, ' ').trim();\n  const matchedCnpj = digitsOnly(beneficiaryMatch?.[2]);\n  const documentLine = compact.match(/Data do documento[^\\n]*N.?\\s*documento[^\\n]*\\n\\s*(\\d{2}\\/\\d{2}\\/\\d{4})\\s+([A-Za-z0-9._\\/-]+)/i);\n  const dueMatch = compact.match(/Vencimento[^\\n]*\\n[^\\n]*?(\\d{2}\\/\\d{2}\\/\\d{4})/i);\n  const payerMatch = compact.match(/Nome do pagador[^\\n]*\\n\\s*([^\\n]{2,140}?)(?:\\s{3,}|$)/i);\n  return {\n    is_boleto: true,\n    issuer_name: issuerName,\n    issuer_cnpj: isValidCnpj(matchedCnpj) && matchedCnpj !== companyCnpj ? matchedCnpj : issuerCnpj,\n    reference_date: String(documentLine?.[1] ?? ''),\n    due_date: String(dueMatch?.[1] ?? ''),\n    document_number: String(documentLine?.[2] ?? ''),\n    recipient_name: String(payerMatch?.[1] ?? '').replace(/\\s{2,}/g, ' ').trim(),\n    warnings: ['TYPE_RECONCILED_FROM_BOLETO_LAYOUT'],\n  };\n};\n\nconst reconcileFiscalIdentity = (input) => {\n  const accessKeyTypes = new Set(['nf-e','nfc-e','ct-e','mdf-e']);\n  const warnings = Array.isArray(input.warnings) ? input.warnings.map(String) : [];\n  const reviewReasons = [];\n  const rawCandidates = Array.isArray(input.access_key_candidates) ? input.access_key_candidates : [];\n  const candidates = [...new Set(rawCandidates.map(digitsOnly).filter(Boolean))];\n  const inspected = candidates.map(inspectAccessKey);\n  const valid = inspected.find((item) => item.valid);\n  let documentType = String(input.document_type ?? 'outro').toLowerCase();\n  let department = String(input.department ?? 'revisar').toLowerCase();\n  let issuerCnpj = digitsOnly(input.issuer_cnpj);\n  if (valid) {\n    if (documentType !== valid.document_type) warnings.push('TYPE_RECONCILED_FROM_ACCESS_KEY');\n    documentType = valid.document_type;\n    department = 'fiscal';\n    if (issuerCnpj && issuerCnpj !== valid.issuer_cnpj) warnings.push('ISSUER_CNPJ_RECONCILED_FROM_ACCESS_KEY');\n    issuerCnpj = valid.issuer_cnpj;\n  } else if (accessKeyTypes.has(documentType)) {\n    reviewReasons.push(candidates.length ? 'FISCAL_ACCESS_KEY_INVALID' : 'FISCAL_ACCESS_KEY_NOT_EVIDENCED');\n  }\n  if (issuerCnpj && !isValidCnpj(issuerCnpj)) reviewReasons.push('ISSUER_CNPJ_INVALID');\n  if (!issuerCnpj) reviewReasons.push('ISSUER_CNPJ_NOT_EVIDENCED');\n  return {\n    document_type: documentType,\n    department,\n    issuer_cnpj: isValidCnpj(issuerCnpj) ? issuerCnpj : '',\n    access_key: valid?.key ?? '',\n    access_key_model: valid?.model ?? '',\n    warnings: [...new Set(warnings)],\n    review_reasons: [...new Set(reviewReasons)],\n  };\n};\nconst request = $input.first().json;\nconst body = request.body ?? request;\nconst sourceFileId = String(body.source_file_id ?? '').trim();\nconst sourceFilename = String(body.source_filename ?? 'documento.pdf').trim();\nconst mimeType = String(body.mime_type ?? '').toLowerCase().trim();\nif (!sourceFileId) throw new Error('SOURCE_FILE_ID_REQUIRED');\nif (!['application/pdf','application/xml','text/xml','image/jpeg','image/png'].includes(mimeType)) throw new Error('UNSUPPORTED_MIME_TYPE');\nconst idempotencyKey = buildIdempotencyKey(body);\nconst tenantId = String(body.tenant_id ?? 'plx').trim();\nconst correlationId = String(body.correlation_id ?? (body.group_id && body.message_id ? [tenantId, body.group_id, body.message_id].join(':') : '')).trim();\nif (!idempotencyKey) throw new Error('IDEMPOTENCY_KEY_REQUIRED');\nif (!correlationId) throw new Error('CORRELATION_ID_REQUIRED');\nconst started = Date.now();\nreturn [{ json: {\n  tenant_id: tenantId,\n  correlation_id: correlationId,\n  benchmark_id: 'plx-v3-' + started + '-' + Math.random().toString(36).slice(2, 8),\n  source_file_id: sourceFileId,\n  source_filename: sourceFilename,\n  mime_type: mimeType,\n  idempotency_key: idempotencyKey,\n  group_id: String(body.group_id ?? '').trim(),\n  message_id: String(body.message_id ?? '').trim(),\n  sender_id: String(body.sender_id ?? '').trim(),\n  sha256: String(body.sha256 ?? '').trim().toLowerCase(),\n  received_at: String(body.received_at ?? new Date().toISOString()),\n  company_name: String(body.company_name ?? 'Giacomelli Transportes'),\n  company_legal_name: String(body.company_legal_name ?? 'Gilson Antonio Giacomelli Transportes Ltda'),\n  company_cnpj: String(body.company_cnpj ?? '09336455000157').replace(/\\D/g, ''),\n  started_at_ms: started,\n  started_at: new Date(started).toISOString(),\n  architecture_version: 'plx-shadow-v3.4.0',\n  model: 'nvidia/nemotron-3.5-lightning-30b-a3b'\n} }];"
         },
         "id": "772bcd48-bd49-4c35-8b7c-c82d691f9f7c",
         "name": "Validar entrada e iniciar cronômetro",
@@ -1126,6 +1126,7 @@
               "received_at": "={{ $('Concluir benchmark').item.json.received_at }}",
               "organized_at": "={{ $('Concluir benchmark').item.json.finished_at }}",
               "updated_at": "={{ $('Concluir benchmark').item.json.finished_at }}",
+              "correlation_id": "={{ $('Concluir benchmark').item.json.correlation_id || $('Validar entrada e iniciar cronômetro').item.json.correlation_id || '' }}",
               "issuer_name": "={{ $('Concluir benchmark').item.json.issuer_name || $('Concluir benchmark').item.json.issuer_name_canonical || '' }}",
               "recipient_name": "={{ $('Concluir benchmark').item.json.recipient_name || '' }}",
               "organized_filename": "={{ $('Concluir benchmark').item.json.organized_filename || '' }}",
@@ -1233,7 +1234,7 @@
       },
       {
         "parameters": {
-          "jsCode": "const input = $input.first().json;\nconst body = input.body ?? input;\nconst eventName = body.event ?? body.eventName ?? '';\nconst message = body.payload?.payload ?? body.payload ?? body.data ?? body;\nconst groupId = message.from ?? message.chatId ?? message.key?.remoteJid ?? message._data?.id?.remote ?? '';\nconst messageId = message.id ?? message.key?.id ?? message._data?.id?.id ?? '';\nconst fromMe = Boolean(message.fromMe ?? message.key?.fromMe ?? message._data?.id?.fromMe);\nconst media = message.media ?? message._data?.media ?? {};\nconst mediaUrl = media.url ?? message.mediaUrl ?? message.downloadUrl ?? '';\nconst mediaUrlText = String(mediaUrl);\nconst authorityMatch = /^([a-z][a-z0-9+.-]*):\\/\\/([^\\/?#]+)(?:[\\/?#]|$)/i.exec(mediaUrlText);\nconst mediaUrlAllowed = Boolean(authorityMatch && authorityMatch[1].toLowerCase() === 'http' && authorityMatch[2].toLowerCase() === 'waha:3000');\nconst mimeType = String(media.mimetype ?? media.mimeType ?? message.mimetype ?? message.mimeType ?? '').toLowerCase();\nconst filename = media.filename ?? message.filename ?? ('documento-' + (messageId || Date.now()));\nconst rawTimestamp = message.timestamp ?? body.timestamp;\nconst receivedAt = new Date(\n  rawTimestamp == null\n    ? Date.now()\n    : Number(rawTimestamp) * (String(rawTimestamp).length <= 10 ? 1000 : 1),\n).toISOString();\n\n// ALTERAR ANTES DE ATIVAR. Um número dedicado deve monitorar somente grupos autorizados.\nconst allowedGroups = ['{{WHATSAPP_GROUP_ID}}@g.us'];\nconst allowedMime = ['image/jpeg', 'image/png', 'application/pdf', 'application/xml', 'text/xml'];\nconst isMessageEvent = eventName === 'message';\nconst isGroup = String(groupId).endsWith('@g.us');\nconst hasMedia = Boolean(mediaUrl && mimeType);\nconst accepted = isMessageEvent && isGroup && allowedGroups.includes(groupId) && !fromMe && hasMedia && allowedMime.includes(mimeType) && mediaUrlAllowed;\nlet reason = 'accepted';\nif (!isMessageEvent) reason = 'ignored_event';\nelse if (!isGroup) reason = 'ignored_private_chat';\nelse if (!allowedGroups.includes(groupId)) reason = 'group_not_authorized';\nelse if (fromMe) reason = 'ignored_own_message';\nelse if (!hasMedia) reason = 'message_without_media';\nelse if (!allowedMime.includes(mimeType)) reason = 'unsupported_mime';\nelse if (!mediaUrlAllowed) reason = 'media_url_not_allowed';\n\nreturn [{ json: {\n  accepted, reason, event_name: eventName, session: body.session ?? message.session ?? '',\n  group_id: groupId, message_id: String(messageId), sender_id: String(message.author ?? message.participant ?? message.from ?? ''),\n  received_at: receivedAt, media_url: mediaUrl, mime_type: mimeType, original_filename: filename,\n  idempotency_key: ['waha', groupId, messageId].join(':'), raw_event_version: 'waha-v1',\n  suppress_confirmation: Boolean(body.suppress_confirmation ?? message.suppress_confirmation ?? false),\n  backfill_batch_id: String(body.backfill_batch_id ?? message.backfill_batch_id ?? '')\n} }];"
+          "jsCode": "const input = $input.first().json;\nconst body = input.body ?? input;\nconst eventName = body.event ?? body.eventName ?? '';\nconst message = body.payload?.payload ?? body.payload ?? body.data ?? body;\nconst groupId = message.from ?? message.chatId ?? message.key?.remoteJid ?? message._data?.id?.remote ?? '';\nconst messageId = message.id ?? message.key?.id ?? message._data?.id?.id ?? '';\nconst fromMe = Boolean(message.fromMe ?? message.key?.fromMe ?? message._data?.id?.fromMe);\nconst media = message.media ?? message._data?.media ?? {};\nconst mediaUrl = media.url ?? message.mediaUrl ?? message.downloadUrl ?? '';\nconst mediaUrlText = String(mediaUrl);\nconst authorityMatch = /^([a-z][a-z0-9+.-]*):\\/\\/([^\\/?#]+)(?:[\\/?#]|$)/i.exec(mediaUrlText);\nconst mediaUrlAllowed = Boolean(authorityMatch && authorityMatch[1].toLowerCase() === 'http' && authorityMatch[2].toLowerCase() === 'waha:3000');\nconst mimeType = String(media.mimetype ?? media.mimeType ?? message.mimetype ?? message.mimeType ?? '').toLowerCase();\nconst filename = media.filename ?? message.filename ?? ('documento-' + (messageId || Date.now()));\nconst rawTimestamp = message.timestamp ?? body.timestamp;\nconst receivedAt = new Date(\n  rawTimestamp == null\n    ? Date.now()\n    : Number(rawTimestamp) * (String(rawTimestamp).length <= 10 ? 1000 : 1),\n).toISOString();\n\n// ALTERAR ANTES DE ATIVAR. Um número dedicado deve monitorar somente grupos autorizados.\nconst allowedGroups = ['{{WHATSAPP_GROUP_ID}}@g.us'];\nconst allowedMime = ['image/jpeg', 'image/png', 'application/pdf', 'application/xml', 'text/xml'];\nconst isMessageEvent = eventName === 'message';\nconst isGroup = String(groupId).endsWith('@g.us');\nconst hasMessageId = Boolean(String(messageId).trim());\nconst tenantId = String(body.tenant_id ?? 'plx').trim();\nconst correlationId = hasMessageId ? [tenantId, groupId, String(messageId)].join(':') : '';\nconst hasMedia = Boolean(mediaUrl && mimeType);\nconst accepted = hasMessageId && isMessageEvent && isGroup && allowedGroups.includes(groupId) && !fromMe && hasMedia && allowedMime.includes(mimeType) && mediaUrlAllowed;\nlet reason = 'accepted';\nif (!hasMessageId) reason = 'missing_message_id';\nelse if (!isMessageEvent) reason = 'ignored_event';\nelse if (!isGroup) reason = 'ignored_private_chat';\nelse if (!allowedGroups.includes(groupId)) reason = 'group_not_authorized';\nelse if (fromMe) reason = 'ignored_own_message';\nelse if (!hasMedia) reason = 'message_without_media';\nelse if (!allowedMime.includes(mimeType)) reason = 'unsupported_mime';\nelse if (!mediaUrlAllowed) reason = 'media_url_not_allowed';\n\nreturn [{ json: {\n  accepted, reason, event_name: eventName, tenant_id: tenantId, correlation_id: correlationId, session: body.session ?? message.session ?? '',\n  group_id: groupId, message_id: String(messageId), sender_id: String(message.author ?? message.participant ?? message.from ?? ''),\n  received_at: receivedAt, media_url: mediaUrl, mime_type: mimeType, original_filename: filename,\n  idempotency_key: ['waha', groupId, messageId].join(':'), raw_event_version: 'waha-v1',\n  suppress_confirmation: Boolean(body.suppress_confirmation ?? message.suppress_confirmation ?? false),\n  backfill_batch_id: String(body.backfill_batch_id ?? message.backfill_batch_id ?? '')\n} }];"
         },
         "id": "v35-ingress-normalize",
         "name": "WAHA · Validar e normalizar",
@@ -1421,7 +1422,7 @@
         "parameters": {
           "mode": "runOnceForAllItems",
           "language": "javaScript",
-          "jsCode": "const src = $('WAHA · Validar e normalizar').first().json;\nconst merged = $input.first().json;\nconst driveId = String(merged.id || merged.drive_file_id || '');\nif (!driveId) throw new Error('SOURCE_DRIVE_FILE_ID_MISSING');\nreturn [{ json: {\n  source_file_id: driveId,\n  source_filename: src.original_filename,\n  mime_type: src.mime_type,\n  group_id: src.group_id,\n  message_id: src.message_id,\n  sender_id: src.sender_id,\n  sha256: String(merged.sha256 || ''),\n  received_at: src.received_at,\n  company_name: 'Giacomelli Transportes',\n  company_legal_name: 'Gilson Antonio Giacomelli Transportes Ltda',\n  company_cnpj: '09336455000157',\n  idempotency_key: src.idempotency_key\n} }];"
+          "jsCode": "const src = $('WAHA · Validar e normalizar').first().json;\nconst merged = $input.first().json;\nconst driveId = String(merged.id || merged.drive_file_id || '');\nif (!driveId) throw new Error('SOURCE_DRIVE_FILE_ID_MISSING');\nreturn [{ json: {\n  tenant_id: src.tenant_id,\n  correlation_id: src.correlation_id,\n  source_file_id: driveId,\n  source_filename: src.original_filename,\n  mime_type: src.mime_type,\n  group_id: src.group_id,\n  message_id: src.message_id,\n  sender_id: src.sender_id,\n  sha256: String(merged.sha256 || ''),\n  received_at: src.received_at,\n  company_name: 'Giacomelli Transportes',\n  company_legal_name: 'Gilson Antonio Giacomelli Transportes Ltda',\n  company_cnpj: '09336455000157',\n  idempotency_key: src.idempotency_key\n} }];"
         }
       },
       {
@@ -1482,6 +1483,113 @@
           "width": 1150,
           "height": 220,
           "color": 5
+        }
+      },
+      {
+        "id": "v35-status-received",
+        "name": "Status · RECEIVED",
+        "type": "n8n-nodes-base.dataTable",
+        "typeVersion": 1.1,
+        "position": [
+          420,
+          -900
+        ],
+        "parameters": {
+          "resource": "row",
+          "operation": "insert",
+          "dataTableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "{{N8N_DATA_TABLE_ID}}",
+            "cachedResultName": "plx_v3_documentos"
+          },
+          "columns": {
+            "mappingMode": "defineBelow",
+            "value": {
+              "correlation_id": "={{ $('WAHA · Validar e normalizar').item.json.correlation_id }}",
+              "tenant_id": "={{ $('WAHA · Validar e normalizar').item.json.tenant_id }}",
+              "group_id": "={{ $('WAHA · Validar e normalizar').item.json.group_id }}",
+              "message_id": "={{ $('WAHA · Validar e normalizar').item.json.message_id }}",
+              "status": "RECEIVED",
+              "received_at": "={{ $('WAHA · Validar e normalizar').item.json.received_at }}"
+            },
+            "matchingColumns": [],
+            "schema": []
+          }
+        }
+      },
+      {
+        "id": "v35-status-extracted",
+        "name": "Status · EXTRACTED",
+        "type": "n8n-nodes-base.dataTable",
+        "typeVersion": 1.1,
+        "position": [
+          2100,
+          520
+        ],
+        "parameters": {
+          "resource": "row",
+          "operation": "update",
+          "dataTableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "{{N8N_DATA_TABLE_ID}}",
+            "cachedResultName": "plx_v3_documentos"
+          },
+          "filters": {
+            "conditions": [
+              {
+                "keyName": "correlation_id",
+                "condition": "eq",
+                "keyValue": "={{ $('Validar entrada e iniciar cronômetro').item.json.correlation_id }}"
+              }
+            ]
+          },
+          "columns": {
+            "mappingMode": "defineBelow",
+            "value": {
+              "status": "EXTRACTED"
+            },
+            "matchingColumns": [],
+            "schema": []
+          }
+        }
+      },
+      {
+        "id": "v35-status-archived",
+        "name": "Status · ARCHIVED",
+        "type": "n8n-nodes-base.dataTable",
+        "typeVersion": 1.1,
+        "position": [
+          900,
+          1040
+        ],
+        "parameters": {
+          "resource": "row",
+          "operation": "update",
+          "dataTableId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "{{N8N_DATA_TABLE_ID}}",
+            "cachedResultName": "plx_v3_documentos"
+          },
+          "filters": {
+            "conditions": [
+              {
+                "keyName": "correlation_id",
+                "condition": "eq",
+                "keyValue": "={{ $('Concluir benchmark').item.json.correlation_id }}"
+              }
+            ]
+          },
+          "columns": {
+            "mappingMode": "defineBelow",
+            "value": {
+              "status": "={{ $('Concluir benchmark').item.json.status || 'ARCHIVED' }}"
+            },
+            "matchingColumns": [],
+            "schema": []
+          }
         }
       },
       {
@@ -2089,6 +2197,11 @@
               "node": "Montar contrato de classificação",
               "type": "main",
               "index": 0
+            },
+            {
+              "node": "Status · EXTRACTED",
+              "type": "main",
+              "index": 0
             }
           ]
         ]
@@ -2498,6 +2611,11 @@
               "node": "Registrar métricas do benchmark",
               "type": "main",
               "index": 0
+            },
+            {
+              "node": "Status · ARCHIVED",
+              "type": "main",
+              "index": 0
             }
           ]
         ]
@@ -2533,7 +2651,7 @@
         "main": [
           [
             {
-              "node": "WAHA · Confirmar recebimento técnico",
+              "node": "Status · RECEIVED",
               "type": "main",
               "index": 0
             }
@@ -2634,6 +2752,17 @@
           [
             {
               "node": "Fila · Documento persistido",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Status · RECEIVED": {
+        "main": [
+          [
+            {
+              "node": "WAHA · Confirmar recebimento técnico",
               "type": "main",
               "index": 0
             }

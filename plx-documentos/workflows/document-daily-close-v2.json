@@ -1,0 +1,298 @@
+{
+  "id": "documentDailyCloseV2",
+  "name": "DOCUMENTOS · Pack 02 · Fechamento diário V2",
+  "active": false,
+  "description": "Exporta manifesto diário em CSV, registra uma linha no Sheets e prepara resumo para o grupo.",
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Sao_Paulo",
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all"
+  },
+  "nodes": [
+    {
+      "id": "schedule",
+      "name": "Fechar dia às 18h",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        240
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 18 * * *"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "read",
+      "name": "Ler manifesto diário",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        240
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "documentos_contabeis_manifesto"
+        },
+        "returnAll": true,
+        "filters": {
+          "conditions": []
+        }
+      }
+    },
+    {
+      "id": "summary",
+      "name": "Consolidar por status e categoria",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        240
+      ],
+      "parameters": {
+        "jsCode": "const rows = $input.all().map((item) => item.json);\nconst date = new Intl.DateTimeFormat('en-CA', { timeZone:'America/Sao_Paulo', year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date());\nconst today = rows.filter((row) => String(row.received_at || '').slice(0,10) === date);\nconst byStatus = {}; const byType = {};\nfor (const row of today) { byStatus[row.status || 'UNKNOWN'] = (byStatus[row.status || 'UNKNOWN'] || 0) + 1; byType[row.document_type || 'outro'] = (byType[row.document_type || 'outro'] || 0) + 1; }\nconst review = today.filter((row) => Boolean(row.review_required)).length;\nreturn today.length ? today.map((row) => ({ json:{ ...row, report_date:date, total_day:today.length, review_total:review, status_summary:JSON.stringify(byStatus), category_summary:JSON.stringify(byType) } })) : [{ json:{ report_date:date, total_day:0, review_total:0, status_summary:'{}', category_summary:'{}', status:'NO_DOCUMENTS' } }];"
+      }
+    },
+    {
+      "id": "csv",
+      "name": "Gerar CSV auditável",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        720,
+        120
+      ],
+      "parameters": {
+        "operation": "csv",
+        "binaryPropertyName": "data",
+        "options": {
+          "delimiter": ";",
+          "headerRow": true,
+          "fileName": "={{ \"fechamento-\" + $json.report_date + \".csv\" }}"
+        }
+      }
+    },
+    {
+      "id": "drive",
+      "name": "Drive · Arquivar CSV",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        960,
+        120
+      ],
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "file",
+        "operation": "upload",
+        "inputDataFieldName": "data",
+        "name": "={{ \"fechamento-\" + $(\"Consolidar por status e categoria\").first().json.report_date + \".csv\" }}",
+        "driveId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "CONFIGURE_DRIVE_REPORTS_FOLDER_ID"
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "CONFIGURE_GOOGLE_DRIVE_CREDENTIAL_ID",
+          "name": "CONFIGURE · Google Drive"
+        }
+      }
+    },
+    {
+      "id": "sheets",
+      "name": "Sheets · Registrar fechamento",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.6,
+      "position": [
+        720,
+        360
+      ],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "CONFIGURE_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Fechamentos"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "data": "={{ $json.report_date }}",
+            "total": "={{ $json.total_day }}",
+            "revisoes": "={{ $json.review_total }}",
+            "status": "={{ $json.status_summary }}",
+            "categorias": "={{ $json.category_summary }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "CONFIGURE_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "CONFIGURE · Google Sheets"
+        }
+      }
+    },
+    {
+      "id": "message",
+      "name": "Preparar resumo do grupo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        360
+      ],
+      "parameters": {
+        "jsCode": "const row = $('Consolidar por status e categoria').first().json;\nreturn [{ json:{ chatId:'CONFIGURE_GROUP_ID@g.us', text:'Fechamento ' + row.report_date + ': ' + row.total_day + ' documento(s), ' + row.review_total + ' em revisão. Categorias: ' + row.category_summary } }];"
+      }
+    },
+    {
+      "id": "send",
+      "name": "WAHA · Enviar resumo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1200,
+        360
+      ],
+      "disabled": true,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.WAHA_BASE_URL + \"/api/sendText\" }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ session:$env.WAHA_SESSION, chatId:$json.chatId, text:$json.text }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "CONFIGURE_WAHA_API_AUTH_ID",
+          "name": "CONFIGURE · WAHA API"
+        }
+      },
+      "notes": "Permanece desabilitado até o cutover e validação do grupo."
+    },
+    {
+      "id": "note",
+      "name": "README · Fechamento V2",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -80
+      ],
+      "parameters": {
+        "content": "## Fechamento diário V2\nRequer Data Table documentos_contabeis_manifesto, pasta de relatórios, planilha Fechamentos e credencial WAHA. O envio ao grupo começa desabilitado.",
+        "width": 980,
+        "height": 200,
+        "color": 5
+      }
+    }
+  ],
+  "connections": {
+    "Fechar dia às 18h": {
+      "main": [
+        [
+          {
+            "node": "Ler manifesto diário",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ler manifesto diário": {
+      "main": [
+        [
+          {
+            "node": "Consolidar por status e categoria",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consolidar por status e categoria": {
+      "main": [
+        [
+          {
+            "node": "Gerar CSV auditável",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Sheets · Registrar fechamento",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gerar CSV auditável": {
+      "main": [
+        [
+          {
+            "node": "Drive · Arquivar CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sheets · Registrar fechamento": {
+      "main": [
+        [
+          {
+            "node": "Preparar resumo do grupo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar resumo do grupo": {
+      "main": [
+        [
+          {
+            "node": "WAHA · Enviar resumo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

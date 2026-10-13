@@ -10,9 +10,9 @@ const workflow = JSON.parse(fs.readFileSync(workflowPath, 'utf8'))[0];
 const node = (name) => workflow.nodes.find((item) => item.name === name);
 
 assert.equal(workflow.active, false);
-assert.equal(workflow.nodes.length, 80);
-assert.equal(new Set(workflow.nodes.map((item) => item.id)).size, 80);
-assert.equal(new Set(workflow.nodes.map((item) => item.name)).size, 80);
+assert.equal(workflow.nodes.length, 83);
+assert.equal(new Set(workflow.nodes.map((item) => item.id)).size, 83);
+assert.equal(new Set(workflow.nodes.map((item) => item.name)).size, 83);
 assert.equal(node('WAHA · Receber evento').parameters.path, 'plx-v35-waha-ingress');
 assert.equal(node('Receber documento de benchmark').parameters.path, 'plx-v35-process-queue');
 assert.equal(node('Fila · Enfileirar documento').parameters.url, 'http://plx-ingress-queue:8090/v1/documents');
@@ -31,7 +31,14 @@ for (const required of [
   'Conteúdo já foi organizado?','Remover cópia temporária repetida',
   'Registrar reenvio sem duplicar arquivo','WhatsApp · Confirmar arquivo já recebido',
   'Fechar dia às 18h','Consolidar documentos do dia',
+  'Status · RECEIVED','Status · EXTRACTED','Status · ARCHIVED',
 ]) assert.ok(node(required), `nó obrigatório ausente: ${required}`);
+
+assert.match(node('WAHA · Validar e normalizar').parameters.jsCode, /correlation_id: correlationId/);
+assert.match(node('Validar entrada e iniciar cronômetro').parameters.jsCode, /CORRELATION_ID_REQUIRED/);
+assert.match(node('Fila · Montar envelope durável').parameters.jsCode, /correlation_id: src\.correlation_id/);
+assert.equal(node('Gravar resultado final no manifesto').parameters.columns.value.correlation_id.includes('correlation_id'), true);
+assert.equal(workflow.connections['WAHA · Validar e normalizar'].main[0][0].node, 'Status · RECEIVED');
 
 assert.ok(workflow.connections['WAHA · Receber evento']);
 assert.ok(workflow.connections['Fila · Montar envelope durável']);
@@ -110,4 +117,4 @@ assert.equal(runNormalize('http://waha:3000/api/files/teste.pdf', { from: '12036
 assert.equal(runNormalize('http://waha:3000/api/files/teste.pdf', { fromMe: true }).reason, 'ignored_own_message');
 assert.equal(runNormalize('http://waha:3000/api/files/teste.exe', { media: { url: 'http://waha:3000/api/files/teste.exe', mimetype: 'application/x-msdownload', filename: 'teste.exe' } }).reason, 'unsupported_mime');
 
-console.log('PASS candidato unificado V3.5: 80 nós, deduplicação por conteúdo e confirmação governada');
+console.log('PASS candidato unificado V3.5: 83 nós, correlação, estados e confirmação governada');

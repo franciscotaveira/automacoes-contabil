@@ -1,0 +1,11 @@
+{
+  "document_base64": "REPLACE_WITH_DATA_URL_FROM_SAMPLE_IMAGE",
+  "mime_type": "image/png",
+  "filename": "NF-12345.png",
+  "tenant_id": "plx-tenant-1",
+  "operation_id": "op-1",
+  "session_id": "sess-1",
+  "group_id": "group-1",
+  "message_id": "msg-123",
+  "correlation_id": "plx-tenant-1:group-1:msg-123"
+}

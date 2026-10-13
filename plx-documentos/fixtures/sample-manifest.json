@@ -1,0 +1,10 @@
+{
+  "entries": [
+    {
+      "correlation_id": "plx-tenant-1:group-1:msg-123",
+      "drive_id": "drive-fixture-1",
+      "hash": "sha256-fixture-document-1",
+      "manifest_path": "Fornecedor/2026/Fiscal/09/30/NF-12345.xml"
+    }
+  ]
+}

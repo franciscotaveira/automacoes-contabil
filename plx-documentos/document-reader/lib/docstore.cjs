@@ -94,6 +94,7 @@ module.exports = {
   createInMemoryDocStore,
   defaultDocStore,
   ensureDocument: defaultDocStore.ensureDocument,
+  getDocument: defaultDocStore.getDocument,
   updateState: defaultDocStore.updateState,
   // TODO(production): replace the in-memory adapter with PostgreSQL using
   // deploy/migrations/003_add_documents_state.sql behind the same interface.

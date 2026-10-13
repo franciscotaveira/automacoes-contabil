@@ -21,6 +21,10 @@ Variáveis novas:
 - `MAX_BODY_BYTES=26214400`: limite do corpo recebido pelo leitor;
 - `UPSTREAM_TIMEOUT_MS=180000`, `MAX_PDF_PAGES=20` e `MAX_PDF_IMAGE_DIMENSION=1800` preservam os limites operacionais existentes.
 
+O painel expõe os contadores operacionais autenticados em `GET /metrics`
+(alias compatível: `GET /api/metrics`). Os valores são filtrados pelo escopo de
+tenants do usuário autenticado.
+
 Testes e validações locais:
 
 ```bash

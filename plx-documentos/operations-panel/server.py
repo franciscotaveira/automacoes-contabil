@@ -129,7 +129,8 @@ class Handler(BaseHTTPRequestHandler):
         if path.path in static:
             name, mime = static[path.path]
             return self.reply(200, (ROOT / 'static' / name).read_bytes(), mime)
-        if not path.path.startswith('/api/'): return self.reply(404, {'error': 'NOT_FOUND'})
+        if path.path != '/metrics' and not path.path.startswith('/api/'):
+            return self.reply(404, {'error': 'NOT_FOUND'})
         try:
             snapshot = json.loads((DATA / 'snapshot.json').read_text())
         except Exception:
@@ -145,7 +146,7 @@ class Handler(BaseHTTPRequestHandler):
             docs = [d for d in docs if d.get('tenant_id') == requested_tenant]
         # The legacy source is exclusively PLX. An unknown tenant receives no source-level data.
         plx = 'plx' in user.get('tenants', [])
-        if path.path == '/api/metrics':
+        if path.path in {'/metrics', '/api/metrics'}:
             return self.reply(200, {**metadata, 'metrics': metrics_snapshot(docs)})
         if path.path == '/api/overview':
             stages, attention = operational_summary(docs, snapshot['executions'] if plx else [])

@@ -689,8 +689,16 @@ export async function reinforceDocument(payload, dependencies = {}) {
     const warnings = unique([...(Array.isArray(original.warnings) ? original.warnings : []), ...(Array.isArray(parsed.warnings) ? parsed.warnings : []), 'AI_REINFORCEMENT_APPLIED']);
     let reasons = splitReasons(original.review_reason);
     const signals = extraction.signals && typeof extraction.signals === 'object' ? extraction.signals : extractDeterministicSignals(text);
-    const validAccessKey = unique([...(signals.valid_access_keys || []), parsed.access_key].filter(validateFiscalAccessKey))[0] || '';
-    const validCnpjs = unique([...(signals.cnpjs || []), parsed.issuer_cnpj].filter(validateCnpj));
+    const literalAccessKeys = unique((signals.valid_access_keys || []).filter(validateFiscalAccessKey));
+    const literalCnpjs = unique((signals.cnpjs || []).filter(validateCnpj));
+    const modelAccessKey = validateFiscalAccessKey(parsed.access_key) ? digits(parsed.access_key) : '';
+    const modelIssuerCnpj = validateCnpj(parsed.issuer_cnpj) ? digits(parsed.issuer_cnpj) : '';
+    const validAccessKey = enforceConfidence
+      ? (modelAccessKey ? literalAccessKeys.find((candidate) => candidate === modelAccessKey) : literalAccessKeys[0]) || ''
+      : unique([...literalAccessKeys, modelAccessKey].filter(Boolean))[0] || '';
+    const validCnpjs = enforceConfidence
+      ? literalCnpjs.filter((candidate) => candidate === modelIssuerCnpj || !modelIssuerCnpj)
+      : unique([...literalCnpjs, modelIssuerCnpj].filter(Boolean));
     const companyCnpj = digits(payload.company_cnpj || original.company_cnpj);
     const issuerCnpj = validAccessKey.slice(6, 20) || validCnpjs.find((value) => value !== companyCnpj) || '';
     const proposedType = compact(parsed.document_type).toLowerCase();
@@ -700,9 +708,12 @@ export async function reinforceDocument(payload, dependencies = {}) {
     const evidence = parsed.evidence && typeof parsed.evidence === 'object' ? parsed.evidence : {};
     const evidenceDate = normalizeDate(String(evidence.date ?? '').match(/\d{4}-\d{2}-\d{2}|\d{2}[/-]\d{2}[/-]\d{4}/)?.[0] || '');
     const dateSourceAllowed = isReferenceDateSourceAllowed(proposedType || next.document_type, parsed.reference_date_source);
-    const dateSupported = proposedDate && dateSourceAllowed && (signalDates.includes(proposedDate) || evidenceDate === proposedDate);
+    const dateSupported = proposedDate && dateSourceAllowed && signalDates.includes(proposedDate)
+      && (!enforceConfidence || evidenceDate === proposedDate);
     const nameSupported = proposedName && textSupportsName(text, proposedName);
-    const typeSupported = proposedType && proposedType !== 'outro' && compact(evidence.type);
+    const literalTypeEvidence = normalizeComparable(evidence.type);
+    const typeSupported = proposedType && proposedType !== 'outro' && literalTypeEvidence
+      && (!enforceConfidence || normalizeComparable(text).includes(literalTypeEvidence));
 
     if (typeSupported) {
       next.document_type = proposedType;
@@ -742,10 +753,10 @@ export async function reinforceDocument(payload, dependencies = {}) {
     next.review_reason = unique(reasons).join('|');
     next.review_required = reasons.length > 0;
     next.reinforcement_required = false;
-    next.reinforcement_accepted = true;
+    next.reinforcement_accepted = reasons.length === 0;
     next.reinforcement_confidence = reinforcementConfidence;
     next.reinforcement_status = reasons.length ? 'UNRESOLVED' : 'RESOLVED';
-    next.decision_reason = reasons.length ? 'REINFORCEMENT_ACCEPTED_WITH_UNRESOLVED_FIELDS' : 'REINFORCEMENT_ACCEPTED';
+    next.decision_reason = reasons.length ? 'REINFORCEMENT_UNRESOLVED' : 'REINFORCEMENT_ACCEPTED';
     next.reinforcement_model = reinforcementModel;
     next.reinforcement_extraction_route = extraction.route;
     next.reinforcement_provider_request_id = compact(response.id);

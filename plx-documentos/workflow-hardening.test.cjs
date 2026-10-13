@@ -8,9 +8,13 @@ const node = (name) => workflow.nodes.find((item) => item.name === name);
 const edges = (name, branch = 0) => workflow.connections[name]?.main?.[branch] || [];
 
 test('WAHA ingress creates and persists a deterministic correlation id', () => {
-  assert.match(node('Validar evento WAHA').parameters.jsCode, /correlationId = \[tenantId, groupId, String\(messageId\)\]/);
+  assert.match(node('Validar evento WAHA').parameters.jsCode, /hasMessageId = Boolean/);
+  assert.match(node('Validar evento WAHA').parameters.jsCode, /configurationReady && groupId && hasMessageId/);
+  assert.match(node('Validar evento WAHA').parameters.jsCode, /reason = 'missing_message_id'/);
   assert.match(node('Validar evento WAHA').parameters.jsCode, /correlation_id: correlationId/);
   assert.equal(node('Registrar manifesto local').parameters.columns.value.correlation_id, '={{ $json.correlation_id ?? "" }}');
+  const correlationColumn = node('Registrar manifesto local').parameters.columns.schema.find((column) => column.id === 'correlation_id');
+  assert.equal(correlationColumn.required, true);
 });
 
 test('accepted documents are persisted before the technical ACK', () => {

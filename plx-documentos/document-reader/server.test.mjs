@@ -171,6 +171,27 @@ test('reinforceDocument sends a low-confidence result to human review', async ()
   assert.equal(result.decision_reason, 'REINFORCEMENT_CONFIDENCE_BELOW_THRESHOLD');
 });
 
+test('strict reinforcement rejects valid-looking fields without literal evidence', async () => {
+  const result = await reinforceDocument({
+    current: { document_type: 'outro', review_required: true, review_reason: 'LOW_CONFIDENCE' },
+  }, {
+    extractDocumentFn: async () => ({
+      text: 'DOCUMENTO SEM IDENTIFICACAO FISCAL LITERAL',
+      route: 'fixture',
+      signals: { cnpjs: [], valid_access_keys: [], dates: [] },
+    }),
+    postJsonFn: async () => guidedResponse(0.95, 'request-fabricated-evidence'),
+    enforceConfidence: true,
+    minReinforcementConfidence: 0.6,
+  });
+  assert.equal(result.reinforcement_accepted, false);
+  assert.equal(result.reinforcement_status, 'UNRESOLVED');
+  assert.equal(result.review_required, true);
+  assert.equal(result.issuer_cnpj, undefined);
+  assert.notEqual(result.document_type, 'nfs-e');
+  assert.equal(result.decision_reason, 'REINFORCEMENT_UNRESOLVED');
+});
+
 test('parseGuidedResponse returns a specific error for invalid model JSON', () => {
   assert.throws(
     () => parseGuidedResponse({ id: 'request-invalid', choices: [{ message: { content: 'not-json' } }] }),

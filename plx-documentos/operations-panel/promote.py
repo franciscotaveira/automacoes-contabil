@@ -1,8 +1,8 @@
 """Run on VPS after a verified backup. Add only /operacao/ to the existing host."""
-from pathlib import Path
-import json
 import hashlib
+import json
 import subprocess
+from pathlib import Path
 
 BASE = Path('/opt/plx-operations-panel')
 backup = Path((BASE / 'backup-path.txt').read_text().strip())

@@ -21,11 +21,9 @@ import urllib.error
 import urllib.request
 from contextlib import closing
 from dataclasses import dataclass
-from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (

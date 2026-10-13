@@ -1,14 +1,15 @@
 import base64
 import hashlib
 import json
-from pathlib import Path
 import sqlite3
 import tempfile
 import threading
 import time
 import unittest
-import urllib.request
 import urllib.error
+import urllib.request
+from pathlib import Path
+
 import collector
 import server
 

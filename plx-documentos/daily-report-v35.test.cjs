@@ -1,7 +1,6 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
 const { buildDailyReport, splitMessage, uniqueDocuments } = require('./daily-report-v35.cjs');
 
 const tests = [];

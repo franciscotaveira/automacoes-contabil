@@ -1,0 +1,15 @@
+{
+  "name": "automacoes-contabil",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Controlled production hardening for the PLX document automation pipeline",
+  "scripts": {
+    "lint": "eslint plx-documentos --ext .js,.cjs,.mjs",
+    "test:node": "node --test plx-documentos/lib/docstore.test.cjs plx-documentos/policy-resolver.test.cjs plx-documentos/document-reader/server.test.mjs plx-documentos/reconciler/test_reconcile.cjs plx-documentos/workflow-hardening.test.cjs plx-documentos/daily-report-v35.test.cjs plx-documentos/daily-close-v35.workflow.test.cjs plx-documentos/unified-v35.workflow.test.cjs",
+    "test": "npm run test:node"
+  },
+  "devDependencies": {
+    "eslint": "8.57.1"
+  }
+}
+

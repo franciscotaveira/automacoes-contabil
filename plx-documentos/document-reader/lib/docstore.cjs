@@ -98,4 +98,3 @@ module.exports = {
   // TODO(production): replace the in-memory adapter with PostgreSQL using
   // deploy/migrations/003_add_documents_state.sql behind the same interface.
 };
-

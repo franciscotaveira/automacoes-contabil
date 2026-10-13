@@ -39,4 +39,3 @@ test('CLI writes the report and exits 2 when inconsistencies exist', () => {
     fs.rmSync(temp, { recursive: true, force: true });
   }
 });
-

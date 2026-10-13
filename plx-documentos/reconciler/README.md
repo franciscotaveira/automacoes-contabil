@@ -12,4 +12,3 @@ node plx-documentos/reconciler/reconcile.js \
 
 O processo termina com `0` quando tudo confere, `2` quando encontra
 discrepâncias e `1` para erro de entrada ou execução.
-

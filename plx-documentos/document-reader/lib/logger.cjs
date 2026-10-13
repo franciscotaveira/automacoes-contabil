@@ -22,4 +22,3 @@ function createLogger(moduleName) {
 }
 
 module.exports = { createLogger, write };
-

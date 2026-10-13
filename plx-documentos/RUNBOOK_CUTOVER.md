@@ -51,4 +51,3 @@ Qualquer código `2` bloqueia o cutover e exige correção ou revisão humana.
 3. Desligar `FEATURE_FLAG_STRICT_MODE` se a regressão estiver na decisão de IA.
 4. Restaurar a versão anterior dos workflows e serviços a partir da tag/commit aprovado.
 5. Rodar o reconciliador e registrar as divergências antes de reprocessar.
-

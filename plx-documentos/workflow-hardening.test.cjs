@@ -23,4 +23,3 @@ test('ignored events receive a distinct non-persisted ACK', () => {
   assert.ok(edges('Documento autorizado?', 1).some((edge) => edge.node === 'Responder evento ignorado'));
   assert.match(node('Responder evento ignorado').parameters.responseBody, /persisted: false/);
 });
-

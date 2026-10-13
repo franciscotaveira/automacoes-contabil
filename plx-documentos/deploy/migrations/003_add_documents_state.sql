@@ -34,4 +34,3 @@ CREATE INDEX IF NOT EXISTS plx_documents_state_idx
 
 COMMENT ON TABLE plx_documents IS
     'Canonical document state used to reconcile queue, manifest, Drive and notification.';
-

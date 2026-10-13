@@ -31,4 +31,3 @@ test('review can resume through a controlled transition', () => {
   assert.equal(resumed.metadata.reason, 'LOW_CONFIDENCE');
   assert.equal(resumed.metadata.reviewed_by, 'operator');
 });
-

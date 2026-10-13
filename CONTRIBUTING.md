@@ -15,4 +15,3 @@ cd plx-documentos/ingress-queue && python -m unittest -v test_queue_service.py
 cd ../operations-panel && python -m unittest -v test_panel.py
 docker build --no-cache -t plx-document-reader:test plx-documentos/document-reader
 ```
-

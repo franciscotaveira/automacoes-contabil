@@ -23,6 +23,10 @@ restrito a `127.0.0.1`; o webhook do WAHA usa a rede privada Docker.
 6. Inicie a sessao `plx-documentos` no WAHA e leia o QR Code pelo tunel.
 7. Execute `./scripts/smoke.sh` antes de apontar qualquer grupo real.
 
+Como alternativa conservadora, `../../scripts/bootstrap.sh` cria o `.env`,
+interrompe enquanto houver `CHANGE_ME`, valida o Compose e constrói o leitor.
+Ele só inicia serviços quando `START_STACK=true`.
+
 ## Migration e cutover
 
 `migrations/003_add_documents_state.sql` define a persistência canônica de

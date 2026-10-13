@@ -41,12 +41,19 @@ function unique(items) {
 }
 
 function quarantine(reasons, policy, extra = {}) {
+  const uniqueReasons = unique(reasons);
   return {
     decision: 'QUARANTINE',
     archive_authorized: false,
     review_required: true,
-    review_reasons: unique(reasons),
+    review_reasons: uniqueReasons,
     policy_version: policy?.policy_version ?? null,
+    decision_reason: uniqueReasons[0] ?? 'QUARANTINE_REQUIRED',
+    decision_log: [
+      `POLICY_VERSION:${policy?.policy_version ?? 'NONE'}`,
+      'DECISION:QUARANTINE',
+      ...uniqueReasons.map((reason) => `REASON:${reason}`),
+    ],
     restricted_root_id: policy?.review?.restricted_root_id ?? null,
     archive_owner: null,
     archive_direction: null,
@@ -121,15 +128,29 @@ function ingressScopeReasons(policy, ingress) {
 /** Select exactly one active policy for an authenticated ingress scope. */
 function resolvePolicyForIngress(policies, ingress) {
   const candidates = Array.isArray(policies) ? policies : [];
-  if (!ingress || typeof ingress !== 'object') return { policy: null, reasons: ['INGRESS_SCOPE_REQUIRED'] };
+  const result = (policy, reasons, decisionReason) => ({
+    policy,
+    reasons,
+    policy_version: policy?.policy_version ?? null,
+    decision_reason: decisionReason,
+    decision_log: [
+      `POLICY_VERSION:${policy?.policy_version ?? 'NONE'}`,
+      `DECISION:${policy ? 'POLICY_SELECTED' : 'POLICY_REJECTED'}`,
+      ...(reasons.length ? reasons.map((reason) => `REASON:${reason}`) : [`REASON:${decisionReason}`]),
+    ],
+  });
+  if (!ingress || typeof ingress !== 'object') return result(null, ['INGRESS_SCOPE_REQUIRED'], 'INGRESS_SCOPE_REQUIRED');
   const required = ['tenant_id', 'operation_id', 'session_id', 'group_id'];
   const missing = required.filter((key) => !present(ingress[key]));
-  if (missing.length) return { policy: null, reasons: missing.map((key) => `INGRESS_${key.toUpperCase()}_REQUIRED`) };
+  if (missing.length) {
+    const reasons = missing.map((key) => `INGRESS_${key.toUpperCase()}_REQUIRED`);
+    return result(null, reasons, reasons[0]);
+  }
   const matches = candidates.filter((policy) => policy?.active === true && required.every((key) => value(policy[key]) === value(ingress[key])));
-  if (matches.length === 0) return { policy: null, reasons: ['POLICY_NOT_FOUND_FOR_INGRESS_SCOPE'] };
-  if (matches.length > 1) return { policy: null, reasons: ['POLICY_MAPPING_AMBIGUOUS'] };
+  if (matches.length === 0) return result(null, ['POLICY_NOT_FOUND_FOR_INGRESS_SCOPE'], 'POLICY_NOT_FOUND_FOR_INGRESS_SCOPE');
+  if (matches.length > 1) return result(null, ['POLICY_MAPPING_AMBIGUOUS'], 'POLICY_MAPPING_AMBIGUOUS');
   const reasons = validatePolicy(matches[0]);
-  return reasons.length ? { policy: null, reasons } : { policy: matches[0], reasons: [] };
+  return reasons.length ? result(null, reasons, reasons[0]) : result(matches[0], [], 'POLICY_SCOPE_EXACT');
 }
 
 function partyIdentity(party) {
@@ -197,6 +218,14 @@ function resolveArchivePolicy({ policy, ingress, document }) {
       review_required: false,
       review_reasons: [],
       policy_version: policy.policy_version,
+      decision_reason: result.proof,
+      decision_log: [
+        `POLICY_VERSION:${policy.policy_version}`,
+        'DECISION:ARCHIVE_AUTHORIZED',
+        `REASON:${result.proof}`,
+        `OWNER:${owner.owner_id}`,
+        `DIRECTION:${result.direction}`,
+      ],
       restricted_root_id: policy.review.restricted_root_id,
       archive_owner: {
         owner_id: owner.owner_id,
@@ -211,6 +240,14 @@ function resolveArchivePolicy({ policy, ingress, document }) {
   return quarantine(unique(candidates.flatMap(({ result }) => result.reasons ?? ['OWNER_NOT_EVIDENCED'])), policy);
 }
 
+function createPolicyResolver({ policies = [] } = {}) {
+  const configuredPolicies = Array.isArray(policies) ? [...policies] : [];
+  return Object.freeze({
+    resolvePolicyForIngress: (ingress) => resolvePolicyForIngress(configuredPolicies, ingress),
+    resolveArchivePolicy: ({ policy, ingress, document }) => resolveArchivePolicy({ policy, ingress, document }),
+  });
+}
+
 module.exports = {
   ARCHIVE_MODES,
   GROUP_MODES,
@@ -220,4 +257,5 @@ module.exports = {
   validatePolicy,
   resolvePolicyForIngress,
   resolveArchivePolicy,
+  createPolicyResolver,
 };

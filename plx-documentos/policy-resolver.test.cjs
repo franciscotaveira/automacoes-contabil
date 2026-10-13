@@ -8,6 +8,7 @@ const {
   resolveArchivePolicy,
   resolvePolicyForIngress,
   validatePolicy,
+  createPolicyResolver,
 } = require('./policy-resolver.cjs');
 
 const ingress = Object.freeze({
@@ -60,6 +61,8 @@ assert.deepEqual(validatePolicy(policy), []);
   assert.equal(result.archive_owner.owner_id, 'empresa-a');
   assert.equal(result.archive_direction, 'received');
   assert.equal(result.identity_proof, 'CNPJ_EXACT');
+  assert.equal(result.decision_reason, 'CNPJ_EXACT');
+  assert.ok(result.decision_log.includes('DECISION:ARCHIVE_AUTHORIZED'));
 }
 
 {
@@ -78,6 +81,7 @@ assert.deepEqual(validatePolicy(policy), []);
   });
   assert.equal(result.decision, 'ARCHIVE_AUTHORIZED');
   assert.equal(result.identity_proof, 'APPROVED_ALIAS_EXACT');
+  assert.equal(result.decision_reason, 'APPROVED_ALIAS_EXACT');
 }
 
 {
@@ -87,6 +91,7 @@ assert.deepEqual(validatePolicy(policy), []);
   });
   assert.equal(result.decision, 'QUARANTINE');
   assert.ok(result.review_reasons.includes('CNPJ_CONFLICT'));
+  assert.equal(result.decision_reason, 'CNPJ_CONFLICT');
 }
 
 {
@@ -154,6 +159,24 @@ assert.deepEqual(validatePolicy(policy), []);
   assert.deepEqual(missing.reasons, ['INGRESS_TENANT_ID_REQUIRED']);
   const ambiguous = resolvePolicyForIngress([policy, policy], ingress);
   assert.deepEqual(ambiguous.reasons, ['POLICY_MAPPING_AMBIGUOUS']);
+  assert.equal(ambiguous.decision_reason, 'POLICY_MAPPING_AMBIGUOUS');
+  assert.equal(ambiguous.policy_version, null);
+}
+
+{
+  const noOwners = { ...policy, allowed_archive_owners: [] };
+  const result = resolveArchivePolicy({ policy: noOwners, ingress, document: {} });
+  assert.equal(result.decision, 'QUARANTINE');
+  assert.equal(result.decision_reason, 'POLICY_ARCHIVE_OWNER_REQUIRED');
+  assert.ok(result.decision_log.includes('REASON:POLICY_ARCHIVE_OWNER_REQUIRED'));
+}
+
+{
+  const resolver = createPolicyResolver({ policies: [policy] });
+  const selected = resolver.resolvePolicyForIngress(ingress);
+  assert.equal(selected.policy, policy);
+  assert.equal(selected.policy_version, 7);
+  assert.equal(selected.decision_reason, 'POLICY_SCOPE_EXACT');
 }
 
 {

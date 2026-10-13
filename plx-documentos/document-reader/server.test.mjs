@@ -2,15 +2,21 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   applyDocumentReviewPolicy,
+  extractDocument,
   extractDeterministicSignals,
   fiscalDocumentTypeFromAccessKey,
   isReferenceDateSourceAllowed,
   parseFiscalXml,
+  parseGuidedResponse,
+  reinforceDocument,
   scoreLocalText,
   sniffMime,
   validateCnpj,
   validateFiscalAccessKey,
 } from './server.mjs';
+import docstoreModule from './lib/docstore.cjs';
+
+const { createInMemoryDocStore } = docstoreModule;
 
 test('parseFiscalXml extracts canonical NF-e fields without a model', () => {
   const xml = `<?xml version="1.0"?><nfeProc><NFe><infNFe Id="NFe42260912345678000195550010000012341000012345"><ide><nNF>1234</nNF><dhEmi>2026-09-30T14:29:16-03:00</dhEmi></ide><emit><CNPJ>12345678000195</CNPJ><xNome>EMITENTE LTDA</xNome></emit><dest><CNPJ>98765432000110</CNPJ><xNome>GIACOMELLI TRANSPORTES</xNome></dest><total><ICMSTot><vNF>1250.90</vNF></ICMSTot></total></infNFe></NFe></nfeProc>`;
@@ -100,4 +106,74 @@ test('reference date semantics match the document type', () => {
   assert.equal(isReferenceDateSourceAllowed('nf-e', 'issue'), true);
   assert.equal(isReferenceDateSourceAllowed('nf-e', 'transaction'), false);
   assert.equal(isReferenceDateSourceAllowed('boleto', 'due'), true);
+});
+
+test('extractDocument preserves compatibility and exposes correlation metadata when supplied', async () => {
+  const xml = '<nfeProc><NFe><infNFe><ide><nNF>1</nNF></ide></infNFe></NFe></nfeProc>';
+  const base = { mime_type: 'application/xml', document_base64: Buffer.from(xml).toString('base64') };
+  const legacy = await extractDocument(base);
+  assert.equal(legacy.metadata, undefined);
+  const store = createInMemoryDocStore();
+  const correlated = await extractDocument({ ...base, correlation_id: 'tenant:group:message', tenant_id: 'tenant-a' }, { docstore: store });
+  assert.equal(correlated.metadata.correlation_id, 'tenant:group:message');
+  assert.equal(correlated.metadata.document_state, 'SOURCE_STORED');
+  assert.equal(store.getDocument('tenant:group:message').tenant_id, 'tenant-a');
+  assert.equal(correlated.decision_reason, 'LOCAL_EXTRACTION_ACCEPTED');
+});
+
+const reinforcementExtraction = {
+  text: 'NOTA FISCAL EMITENTE LTDA emissão 30/09/2026',
+  route: 'fixture',
+  signals: { cnpjs: ['12345678000195'], valid_access_keys: [], dates: ['30/09/2026'] },
+};
+
+const guidedResponse = (confidence, id = 'request-test') => ({
+  id,
+  choices: [{ message: { content: JSON.stringify({
+    department: 'fiscal', document_type: 'nfs-e', issuer_name: 'EMITENTE LTDA',
+    issuer_cnpj: '12345678000195', recipient_name: null, recipient_cnpj: null,
+    document_number: '1', access_key: null, reference_date: '2026-09-30',
+    reference_date_source: 'issue', confidence,
+    evidence: { type: 'NOTA FISCAL', company: 'EMITENTE LTDA', date: '30/09/2026' }, warnings: [],
+  }) } }],
+});
+
+test('reinforceDocument accepts a high-confidence governed result', async () => {
+  const result = await reinforceDocument({
+    correlation_id: 'corr-high',
+    current: { document_type: 'outro', review_required: true, review_reason: 'LOW_CONFIDENCE' },
+  }, {
+    extractDocumentFn: async () => reinforcementExtraction,
+    postJsonFn: async () => guidedResponse(0.91),
+    enforceConfidence: true,
+    minReinforcementConfidence: 0.6,
+  });
+  assert.equal(result.reinforcement_accepted, true);
+  assert.equal(result.reinforcement_confidence, 0.91);
+  assert.equal(result.reinforcement_status, 'RESOLVED');
+  assert.equal(result.decision_reason, 'REINFORCEMENT_ACCEPTED');
+  assert.equal(result.metadata.correlation_id, 'corr-high');
+});
+
+test('reinforceDocument sends a low-confidence result to human review', async () => {
+  const result = await reinforceDocument({
+    current: { document_type: 'outro', review_required: true, review_reason: 'LOW_CONFIDENCE' },
+  }, {
+    extractDocumentFn: async () => reinforcementExtraction,
+    postJsonFn: async () => guidedResponse(0.4),
+    enforceConfidence: true,
+    minReinforcementConfidence: 0.6,
+  });
+  assert.equal(result.reinforcement_accepted, false);
+  assert.equal(result.reinforcement_status, 'UNRESOLVED');
+  assert.equal(result.review_required, true);
+  assert.match(result.review_reason, /LOW_REINFORCEMENT_CONFIDENCE/);
+  assert.equal(result.decision_reason, 'REINFORCEMENT_CONFIDENCE_BELOW_THRESHOLD');
+});
+
+test('parseGuidedResponse returns a specific error for invalid model JSON', () => {
+  assert.throws(
+    () => parseGuidedResponse({ id: 'request-invalid', choices: [{ message: { content: 'not-json' } }] }),
+    /reinforcement_model_invalid_json/,
+  );
 });

@@ -112,7 +112,7 @@ services:
     security_opt: [no-new-privileges:true]
 
   document-ai-gateway:
-    build: ./document-reader
+    build: ../document-reader
     environment:
       NVIDIA_API_KEY: ${NVIDIA_API_KEY:?Configure NVIDIA_API_KEY}
       PORT: "8080"

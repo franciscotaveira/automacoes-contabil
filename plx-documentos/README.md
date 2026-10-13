@@ -1,5 +1,53 @@
 # Automação de documentos contábeis recebidos em grupos do WhatsApp
 
+## Hardening para produção controlada
+
+O ingresso usa `correlation_id` determinístico (`tenant_id + group_id +
+message_id`), persiste o manifesto antes do ACK técnico e propaga o identificador
+ao subworkflow de análise. O leitor mantém compatibilidade com payloads antigos:
+sem `correlation_id`, a resposta continua válida e não inclui metadata adicional.
+
+A máquina de estados canônica está definida em
+`deploy/migrations/003_add_documents_state.sql`. A migration é apenas uma
+definição versionada e **não deve ser aplicada automaticamente**. O adaptador
+atual de `lib/docstore.js` usa memória para testes; PostgreSQL permanece como
+etapa explícita de cutover.
+
+Variáveis novas:
+
+- `FEATURE_FLAG_STRICT_MODE=false`: mantém mudanças de decisão desativadas por padrão;
+- `MIN_REINFORCEMENT_CONFIDENCE=0.6`: confiança mínima do reforço quando o modo estrito estiver ativo;
+- `MIN_LOCAL_OCR_SCORE_FOR_ACCEPT=8`: score mínimo para aceitar OCR local;
+- `MAX_BODY_BYTES=26214400`: limite do corpo recebido pelo leitor;
+- `UPSTREAM_TIMEOUT_MS=180000`, `MAX_PDF_PAGES=20` e `MAX_PDF_IMAGE_DIMENSION=1800` preservam os limites operacionais existentes.
+
+O painel expõe os contadores operacionais autenticados em `GET /metrics`
+(alias compatível: `GET /api/metrics`). Os valores são filtrados pelo escopo de
+tenants do usuário autenticado.
+
+Testes e validações locais:
+
+```bash
+npm ci
+npm run lint
+npm run test:node
+cd plx-documentos/ingress-queue && python -m unittest -v test_queue_service.py
+cd ../operations-panel && python -m unittest -v test_panel.py
+docker build --no-cache -t plx-document-reader:test plx-documentos/document-reader
+```
+
+Reconciliador local, sem acesso ao Drive real:
+
+```bash
+node plx-documentos/reconciler/reconcile.js \
+  --manifest plx-documentos/reconciler/fixtures/sample-manifest.json \
+  --drive-sim plx-documentos/reconciler/fixtures/sample-drive.json \
+  --out /tmp/plx-reconciliation.json
+```
+
+O reconciliador termina com código `2` quando encontra qualquer divergência.
+Consulte [RUNBOOK_CUTOVER.md](RUNBOOK_CUTOVER.md) antes de habilitar um webhook.
+
 > **Validação comercial mais recente (10/10/2026):** [VALIDACAO-COMERCIAL-PLX-2026-10-10.md](evidence/VALIDACAO-COMERCIAL-PLX-2026-10-10.md). O sistema está apto para piloto comercial assistido, com dois gates restantes para operação autônoma.
 >
 > **Regra para novos fluxos:** [PADRAO-DE-COMPLEXIDADE-E-REDUCAO-DE-NOS.md](PADRAO-DE-COMPLEXIDADE-E-REDUCAO-DE-NOS.md).

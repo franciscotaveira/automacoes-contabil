@@ -2,10 +2,11 @@
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const path = require('node:path');
 const vm = require('node:vm');
 
 require('./build-daily-close-v35.cjs');
-const workflow = JSON.parse(fs.readFileSync('./workflows/plx-daily-close-v35-candidate.json', 'utf8'))[0];
+const workflow = JSON.parse(fs.readFileSync(path.join(__dirname, 'workflows', 'plx-daily-close-v35-candidate.json'), 'utf8'))[0];
 const node = (name) => workflow.nodes.find((item) => item.name === name);
 
 assert.equal(workflow.active, false);

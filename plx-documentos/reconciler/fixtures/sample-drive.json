@@ -1,0 +1,6 @@
+{
+  "files": [
+    { "drive_id": "drive-file-1", "hash": "sha256-document-1" },
+    { "drive_id": "drive-file-2", "hash": "sha256-document-2" }
+  ]
+}

@@ -5,8 +5,13 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import docstoreModule from './lib/docstore.cjs';
+import loggerModule from './lib/logger.cjs';
 
 const execFileAsync = promisify(execFile);
+const { defaultDocStore } = docstoreModule;
+const { createLogger } = loggerModule;
+const logger = createLogger('document-reader');
 
 export const READER_VERSION = 'hybrid-v3.2.0';
 const port = Number(process.env.PORT || 8080);
@@ -15,10 +20,13 @@ const maxBytes = Number(process.env.MAX_BODY_BYTES || 25 * 1024 * 1024);
 const timeoutMs = Number(process.env.UPSTREAM_TIMEOUT_MS || 180000);
 const maxPdfPages = Number(process.env.MAX_PDF_PAGES || 20);
 const maxPdfImageDimension = Number(process.env.MAX_PDF_IMAGE_DIMENSION || 1800);
-const localOcrMinScore = Number(process.env.LOCAL_OCR_MIN_SCORE || 8);
+const localOcrMinScore = Number(process.env.MIN_LOCAL_OCR_SCORE_FOR_ACCEPT || process.env.LOCAL_OCR_MIN_SCORE || 8);
+const minReinforcementConfidence = Number(process.env.MIN_REINFORCEMENT_CONFIDENCE || 0.6);
+const strictMode = String(process.env.FEATURE_FLAG_STRICT_MODE || 'false').toLowerCase() === 'true';
 const nvidiaOcrEnabled = String(process.env.NVIDIA_OCR_ENABLED || 'true').toLowerCase() !== 'false';
 const reinforcementModel = process.env.REINFORCEMENT_MODEL || 'nvidia/nemotron-3-super-120b-a12b';
 const ocrEndpoint = 'https://ai.api.nvidia.com/v1/cv/nvidia/nemotron-ocr-v2';
+let lastReinforcementMs = null;
 
 const routes = new Map([
   ['/v1/chat/completions', 'https://integrate.api.nvidia.com/v1/chat/completions'],
@@ -437,7 +445,7 @@ async function pdfPageCount(pdfPath) {
   }
 }
 
-export async function extractDocument(payload) {
+async function extractDocumentCore(payload) {
   const declaredMime = String(payload.mime_type || '').toLowerCase();
   const encoded = String(payload.document_base64 || '').replace(/^data:[^;]+;base64,/, '').replace(/\s/g, '');
   if (!encoded) throw Object.assign(new Error('missing_document_base64'), { statusCode: 400 });
@@ -500,6 +508,52 @@ export async function extractDocument(payload) {
   }
 }
 
+export async function extractDocument(payload, { docstore = defaultDocStore } = {}) {
+  const correlationId = compact(payload?.correlation_id);
+  let documentRecord = null;
+  if (correlationId) {
+    try {
+      docstore.ensureDocument(correlationId, {
+        tenant_id: payload.tenant_id,
+        operation_id: payload.operation_id,
+        session_id: payload.session_id || payload.session,
+        group_id: payload.group_id,
+        message_id: payload.message_id,
+        document_hash: payload.document_hash || payload.sha256,
+        policy_version: payload.policy_version,
+      });
+      documentRecord = docstore.updateState(correlationId, 'SOURCE_STORED', {
+        document_hash: compact(payload.document_hash || payload.sha256) || null,
+      });
+    } catch (error) {
+      logger.warn('docstore_update_failed', {
+        correlation_id: correlationId,
+        error: compact(error?.message || 'unknown_error'),
+      });
+      if (strictMode) throw error;
+    }
+  }
+
+  const result = await extractDocumentCore(payload);
+  const confidence = Number.isFinite(Number(result.mean_confidence))
+    ? Number(result.mean_confidence)
+    : (Number(result.local_quality?.score || 0) >= localOcrMinScore ? 1 : 0);
+  const accepted = ['xml_structured', 'pdf_native_text'].includes(result.route)
+    || Number(result.local_quality?.score || 0) >= localOcrMinScore
+    || (result.fallback_used === true && confidence >= minReinforcementConfidence);
+  const decisionReason = accepted ? 'LOCAL_EXTRACTION_ACCEPTED' : 'LOCAL_EXTRACTION_REQUIRES_REVIEW';
+  const enriched = { ...result, confidence, decision_reason: decisionReason };
+  if (!correlationId) return enriched;
+  return {
+    ...enriched,
+    metadata: {
+      ...(result.metadata || {}),
+      correlation_id: correlationId,
+      document_state: documentRecord?.state || 'SOURCE_STORED',
+    },
+  };
+}
+
 function reinforcementSchema() {
   const nullableString = { type: ['string', 'null'] };
   return {
@@ -529,26 +583,63 @@ function reinforcementSchema() {
   };
 }
 
-function parseGuidedResponse(response) {
+export function parseGuidedResponse(response) {
   const raw = compact(response?.choices?.[0]?.message?.content ?? response?.choices?.[0]?.message?.reasoning_content);
   const start = raw.indexOf('{');
   const end = raw.lastIndexOf('}');
-  if (start < 0 || end <= start) throw new Error('reinforcement_model_invalid_json');
-  return JSON.parse(raw.slice(start, end + 1));
+  try {
+    if (start < 0 || end <= start) throw new Error('invalid_json_envelope');
+    return JSON.parse(raw.slice(start, end + 1));
+  } catch (error) {
+    logger.warn('reinforcement_model_invalid_json', {
+      provider_request_id: compact(response?.id) || null,
+      error: compact(error?.message || 'unknown_error'),
+    });
+    const invalid = new Error('reinforcement_model_invalid_json');
+    invalid.provider_request_id = compact(response?.id) || null;
+    throw invalid;
+  }
 }
 
-export async function reinforceDocument(payload) {
+export async function reinforceDocument(payload, dependencies = {}) {
   const startedAt = Date.now();
+  const extractDocumentFn = dependencies.extractDocumentFn || extractDocument;
+  const postJsonFn = dependencies.postJsonFn || postJson;
+  const confidenceThreshold = Number(dependencies.minReinforcementConfidence ?? minReinforcementConfidence);
+  const enforceConfidence = dependencies.enforceConfidence ?? strictMode;
+  const correlationId = compact(payload?.correlation_id);
+  const withMetadata = (document) => correlationId ? {
+    ...document,
+    metadata: { ...(document.metadata || {}), correlation_id: correlationId },
+  } : document;
   const original = applyDocumentReviewPolicy(payload.current && typeof payload.current === 'object' ? payload.current : {});
   if (!original.reinforcement_required) {
-    return { ...original, reinforcement_status: 'NOT_REQUIRED', reinforcement_ms: Date.now() - startedAt };
+    const elapsed = Date.now() - startedAt;
+    lastReinforcementMs = elapsed;
+    return withMetadata({
+      ...original,
+      confidence: Number(original.confidence || 0),
+      decision_reason: 'REINFORCEMENT_NOT_REQUIRED',
+      reinforcement_accepted: false,
+      reinforcement_confidence: 0,
+      reinforcement_status: 'NOT_REQUIRED',
+      reinforcement_ms: elapsed,
+    });
   }
   try {
-    const extraction = await extractDocument({
+    const extraction = await extractDocumentFn({
       document_base64: payload.document_base64,
       mime_type: payload.mime_type || original.mime_type,
       filename: payload.filename || original.source_filename || original.original_filename,
       force_nvidia_ocr: true,
+      correlation_id: correlationId || undefined,
+      tenant_id: payload.tenant_id,
+      operation_id: payload.operation_id,
+      session_id: payload.session_id || payload.session,
+      group_id: payload.group_id,
+      message_id: payload.message_id,
+      document_hash: payload.document_hash || payload.sha256,
+      policy_version: payload.policy_version,
     });
     const text = String(extraction.text ?? '').slice(0, 100000);
     if (!text.replace(/\s/g, '').length) throw new Error('reinforcement_extraction_empty');
@@ -564,7 +655,7 @@ export async function reinforceDocument(payload) {
       `Pendências a resolver: ${original.review_reason}`,
       `CONTEÚDO REEXTRAÍDO:\n${text}`,
     ].join('\n');
-    const response = await postJson(routes.get('/v1/chat/completions'), {
+    const response = await postJsonFn(routes.get('/v1/chat/completions'), {
       model: reinforcementModel,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0,
@@ -574,12 +665,40 @@ export async function reinforceDocument(payload) {
       chat_template_kwargs: { enable_thinking: false },
     });
     const parsed = parseGuidedResponse(response);
+    const reinforcementConfidence = Number(parsed.confidence || 0);
+    if (enforceConfidence && reinforcementConfidence < confidenceThreshold) {
+      const elapsed = Date.now() - startedAt;
+      lastReinforcementMs = elapsed;
+      return withMetadata({
+        ...original,
+        confidence: Math.max(Number(original.confidence || 0), reinforcementConfidence),
+        decision_reason: 'REINFORCEMENT_CONFIDENCE_BELOW_THRESHOLD',
+        review_required: true,
+        review_reason: unique([...splitReasons(original.review_reason), 'LOW_REINFORCEMENT_CONFIDENCE']).join('|'),
+        warnings: unique([...(Array.isArray(original.warnings) ? original.warnings : []), 'AI_REINFORCEMENT_REJECTED_LOW_CONFIDENCE']),
+        reinforcement_required: false,
+        reinforcement_accepted: false,
+        reinforcement_confidence: reinforcementConfidence,
+        reinforcement_status: 'UNRESOLVED',
+        reinforcement_model: reinforcementModel,
+        reinforcement_provider_request_id: compact(response.id),
+        reinforcement_ms: elapsed,
+      });
+    }
     const next = { ...original };
     const warnings = unique([...(Array.isArray(original.warnings) ? original.warnings : []), ...(Array.isArray(parsed.warnings) ? parsed.warnings : []), 'AI_REINFORCEMENT_APPLIED']);
     let reasons = splitReasons(original.review_reason);
     const signals = extraction.signals && typeof extraction.signals === 'object' ? extraction.signals : extractDeterministicSignals(text);
-    const validAccessKey = unique([...(signals.valid_access_keys || []), parsed.access_key].filter(validateFiscalAccessKey))[0] || '';
-    const validCnpjs = unique([...(signals.cnpjs || []), parsed.issuer_cnpj].filter(validateCnpj));
+    const literalAccessKeys = unique((signals.valid_access_keys || []).filter(validateFiscalAccessKey));
+    const literalCnpjs = unique((signals.cnpjs || []).filter(validateCnpj));
+    const modelAccessKey = validateFiscalAccessKey(parsed.access_key) ? digits(parsed.access_key) : '';
+    const modelIssuerCnpj = validateCnpj(parsed.issuer_cnpj) ? digits(parsed.issuer_cnpj) : '';
+    const validAccessKey = enforceConfidence
+      ? (modelAccessKey ? literalAccessKeys.find((candidate) => candidate === modelAccessKey) : literalAccessKeys[0]) || ''
+      : unique([...literalAccessKeys, modelAccessKey].filter(Boolean))[0] || '';
+    const validCnpjs = enforceConfidence
+      ? literalCnpjs.filter((candidate) => candidate === modelIssuerCnpj || !modelIssuerCnpj)
+      : unique([...literalCnpjs, modelIssuerCnpj].filter(Boolean));
     const companyCnpj = digits(payload.company_cnpj || original.company_cnpj);
     const issuerCnpj = validAccessKey.slice(6, 20) || validCnpjs.find((value) => value !== companyCnpj) || '';
     const proposedType = compact(parsed.document_type).toLowerCase();
@@ -589,9 +708,12 @@ export async function reinforceDocument(payload) {
     const evidence = parsed.evidence && typeof parsed.evidence === 'object' ? parsed.evidence : {};
     const evidenceDate = normalizeDate(String(evidence.date ?? '').match(/\d{4}-\d{2}-\d{2}|\d{2}[/-]\d{2}[/-]\d{4}/)?.[0] || '');
     const dateSourceAllowed = isReferenceDateSourceAllowed(proposedType || next.document_type, parsed.reference_date_source);
-    const dateSupported = proposedDate && dateSourceAllowed && (signalDates.includes(proposedDate) || evidenceDate === proposedDate);
+    const dateSupported = proposedDate && dateSourceAllowed && signalDates.includes(proposedDate)
+      && (!enforceConfidence || evidenceDate === proposedDate);
     const nameSupported = proposedName && textSupportsName(text, proposedName);
-    const typeSupported = proposedType && proposedType !== 'outro' && compact(evidence.type);
+    const literalTypeEvidence = normalizeComparable(evidence.type);
+    const typeSupported = proposedType && proposedType !== 'outro' && literalTypeEvidence
+      && (!enforceConfidence || normalizeComparable(text).includes(literalTypeEvidence));
 
     if (typeSupported) {
       next.document_type = proposedType;
@@ -631,22 +753,32 @@ export async function reinforceDocument(payload) {
     next.review_reason = unique(reasons).join('|');
     next.review_required = reasons.length > 0;
     next.reinforcement_required = false;
+    next.reinforcement_accepted = reasons.length === 0;
+    next.reinforcement_confidence = reinforcementConfidence;
     next.reinforcement_status = reasons.length ? 'UNRESOLVED' : 'RESOLVED';
+    next.decision_reason = reasons.length ? 'REINFORCEMENT_UNRESOLVED' : 'REINFORCEMENT_ACCEPTED';
     next.reinforcement_model = reinforcementModel;
     next.reinforcement_extraction_route = extraction.route;
     next.reinforcement_provider_request_id = compact(response.id);
     next.reinforcement_ms = Date.now() - startedAt;
-    return next;
+    lastReinforcementMs = next.reinforcement_ms;
+    return withMetadata(next);
   } catch (error) {
-    return {
+    const elapsed = Date.now() - startedAt;
+    lastReinforcementMs = elapsed;
+    return withMetadata({
       ...original,
       warnings: unique([...(Array.isArray(original.warnings) ? original.warnings : []), 'AI_REINFORCEMENT_FAILED']),
+      confidence: Number(original.confidence || 0),
+      decision_reason: 'REINFORCEMENT_FAILED',
       reinforcement_required: false,
+      reinforcement_accepted: false,
+      reinforcement_confidence: 0,
       reinforcement_status: 'FAILED',
       reinforcement_model: reinforcementModel,
       reinforcement_error: compact(error?.message || 'unknown_error').slice(0, 160),
-      reinforcement_ms: Date.now() - startedAt,
-    };
+      reinforcement_ms: elapsed,
+    });
   }
 }
 
@@ -681,6 +813,12 @@ export function createServer() {
         ok: true,
         reader_version: READER_VERSION,
         nvidia_configured: Boolean(apiKey) && !['CHANGE_ME', 'PENDING_CONFIGURATION'].includes(apiKey),
+        thresholds: {
+          min_reinforcement_confidence: minReinforcementConfidence,
+          min_local_ocr_score_for_accept: localOcrMinScore,
+          strict_mode: strictMode,
+        },
+        last_reinforcement_ms: lastReinforcementMs,
         capabilities: ['xml_structured', 'pdf_native_text', 'image_preprocessing', 'local_ocr', 'barcode', 'nvidia_ocr_fallback', 'governed_ai_reinforcement'],
         routes: [...routes.keys(), '/v1/document/extract', '/v1/document/reinforce'],
       });
@@ -732,5 +870,5 @@ export function createServer() {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  createServer().listen(port, '0.0.0.0', () => console.log(JSON.stringify({ event: 'document_ai_gateway_ready', port, reader_version: READER_VERSION })));
+  createServer().listen(port, '0.0.0.0', () => logger.info('document_ai_gateway_ready', { port, reader_version: READER_VERSION }));
 }

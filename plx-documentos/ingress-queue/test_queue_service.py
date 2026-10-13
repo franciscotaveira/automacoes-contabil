@@ -8,7 +8,13 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from queue_service import Dispatcher, QueueHttpHandler, QueueHttpServer, QueueStore, idempotency_key
+from queue_service import (
+    Dispatcher,
+    QueueHttpHandler,
+    QueueHttpServer,
+    QueueStore,
+    idempotency_key,
+)
 
 
 class FakeDispatcher(Dispatcher):

@@ -1,14 +1,15 @@
 import base64
 import hashlib
 import json
-from pathlib import Path
 import sqlite3
 import tempfile
 import threading
 import time
 import unittest
-import urllib.request
 import urllib.error
+import urllib.request
+from pathlib import Path
+
 import collector
 import server
 
@@ -60,6 +61,9 @@ class PanelTests(unittest.TestCase):
                 self.assertEqual(res['clients'][0]['documents'],1)
                 _,res=request('/api/overview','b');self.assertEqual(res['total'],0);self.assertEqual(res['executions'],[]);self.assertEqual(res['session'],{})
                 self.assertEqual(request('/api/documents/1','b')[0],404)
+                code,res=request('/api/metrics','a');self.assertEqual(code,200);self.assertEqual(res['metrics']['document_received_total'],1);self.assertEqual(res['metrics']['document_archived_total'],1)
+                code,res=request('/metrics','a');self.assertEqual(code,200);self.assertEqual(res['metrics']['reinforcement_failures_total'],0)
+                self.assertEqual(request('/metrics')[0],401)
                 self.assertEqual(request('/api/documents?tenant=plx','b')[1]['total'],0)
                 self.assertEqual(request('/api/documents?offset=bad','a')[0],400)
                 self.assertEqual(request('/api/documents/1','a',method='POST')[0],405)

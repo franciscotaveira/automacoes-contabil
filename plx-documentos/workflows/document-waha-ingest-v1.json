@@ -39,7 +39,7 @@
         320
       ],
       "parameters": {
-        "jsCode": "const input = $input.first().json;\nconst body = input.body ?? input;\nconst eventName = body.event ?? body.eventName ?? '';\nconst message = body.payload?.payload ?? body.payload ?? body.data ?? body;\nconst groupId = message.from ?? message.chatId ?? message.key?.remoteJid ?? message._data?.id?.remote ?? '';\nconst messageId = message.id ?? message.key?.id ?? message._data?.id?.id ?? '';\nconst fromMe = Boolean(message.fromMe ?? message.key?.fromMe ?? message._data?.id?.fromMe);\nconst media = message.media ?? message._data?.media ?? {};\nconst mediaUrl = media.url ?? message.mediaUrl ?? message.downloadUrl ?? '';\nconst mimeType = String(media.mimetype ?? media.mimeType ?? message.mimetype ?? message.mimeType ?? '').toLowerCase();\nconst filename = media.filename ?? message.filename ?? ('documento-' + (messageId || Date.now()));\nconst rawTimestamp = message.timestamp ?? body.timestamp;\nconst receivedAt = new Date(\n  rawTimestamp == null\n    ? Date.now()\n    : Number(rawTimestamp) * (String(rawTimestamp).length <= 10 ? 1000 : 1),\n).toISOString();\n\n// ALTERAR ANTES DE ATIVAR. Um número dedicado deve monitorar somente grupos autorizados.\nconst allowedGroups = ['CONFIGURE_GROUP_ID@g.us'];\nconst allowedMime = ['image/jpeg', 'image/png', 'application/pdf', 'application/xml', 'text/xml'];\nconst isMessageEvent = !eventName || ['message', 'message.any', 'message.received'].includes(eventName);\nconst isGroup = String(groupId).endsWith('@g.us');\nconst hasMedia = Boolean(mediaUrl && mimeType);\nconst accepted = isMessageEvent && isGroup && allowedGroups.includes(groupId) && !fromMe && hasMedia && allowedMime.includes(mimeType);\nlet reason = 'accepted';\nif (!isMessageEvent) reason = 'ignored_event';\nelse if (!isGroup) reason = 'ignored_private_chat';\nelse if (!allowedGroups.includes(groupId)) reason = 'group_not_authorized';\nelse if (fromMe) reason = 'ignored_own_message';\nelse if (!hasMedia) reason = 'message_without_media';\nelse if (!allowedMime.includes(mimeType)) reason = 'unsupported_mime';\n\nreturn [{ json: {\n  accepted, reason, event_name: eventName, session: body.session ?? message.session ?? '',\n  group_id: groupId, message_id: String(messageId), sender_id: String(message.author ?? message.participant ?? message.from ?? ''),\n  received_at: receivedAt, media_url: mediaUrl, mime_type: mimeType, original_filename: filename,\n  idempotency_key: ['waha', groupId, messageId].join(':'), raw_event_version: 'waha-v1'\n} }];"
+        "jsCode": "const input = $input.first().json;\nconst body = input.body ?? input;\nconst eventName = body.event ?? body.eventName ?? '';\nconst message = body.payload?.payload ?? body.payload ?? body.data ?? body;\nconst groupId = message.from ?? message.chatId ?? message.key?.remoteJid ?? message._data?.id?.remote ?? '';\nconst messageId = message.id ?? message.key?.id ?? message._data?.id?.id ?? '';\nconst fromMe = Boolean(message.fromMe ?? message.key?.fromMe ?? message._data?.id?.fromMe);\nconst media = message.media ?? message._data?.media ?? {};\nconst mediaUrl = media.url ?? message.mediaUrl ?? message.downloadUrl ?? '';\nconst mimeType = String(media.mimetype ?? media.mimeType ?? message.mimetype ?? message.mimeType ?? '').toLowerCase();\nconst filename = media.filename ?? message.filename ?? ('documento-' + (messageId || Date.now()));\nconst rawTimestamp = message.timestamp ?? body.timestamp;\nconst tenantId = 'CONFIGURE_TENANT_ID';\nconst operationId = 'CONFIGURE_OPERATION_ID';\nconst configurationReady = ![tenantId, operationId].some((item) => !item || String(item).startsWith('CONFIGURE_'));\nconst hasMessageId = Boolean(String(messageId).trim());\nconst correlationId = configurationReady && groupId && hasMessageId\n  ? [tenantId, groupId, String(messageId)].join(':')\n  : '';\nconst receivedAt = new Date(\n  rawTimestamp == null\n    ? Date.now()\n    : Number(rawTimestamp) * (String(rawTimestamp).length <= 10 ? 1000 : 1),\n).toISOString();\n\n// ALTERAR ANTES DE ATIVAR. Um número dedicado deve monitorar somente grupos autorizados.\nconst allowedGroups = ['CONFIGURE_GROUP_ID@g.us'];\nconst allowedMime = ['image/jpeg', 'image/png', 'application/pdf', 'application/xml', 'text/xml'];\nconst isMessageEvent = !eventName || ['message', 'message.any', 'message.received'].includes(eventName);\nconst isGroup = String(groupId).endsWith('@g.us');\nconst hasMedia = Boolean(mediaUrl && mimeType);\nconst accepted = configurationReady && isMessageEvent && isGroup && allowedGroups.includes(groupId) && hasMessageId && !fromMe && hasMedia && allowedMime.includes(mimeType);\nlet reason = 'accepted';\nif (!configurationReady) reason = 'configuration_incomplete';\nelse if (!isMessageEvent) reason = 'ignored_event';\nelse if (!isGroup) reason = 'ignored_private_chat';\nelse if (!allowedGroups.includes(groupId)) reason = 'group_not_authorized';\nelse if (!hasMessageId) reason = 'missing_message_id';\nelse if (fromMe) reason = 'ignored_own_message';\nelse if (!hasMedia) reason = 'message_without_media';\nelse if (!allowedMime.includes(mimeType)) reason = 'unsupported_mime';\n\nreturn [{ json: {\n  accepted, reason, event_name: eventName, tenant_id: tenantId, operation_id: operationId, session: body.session ?? message.session ?? '',\n  group_id: groupId, message_id: String(messageId), sender_id: String(message.author ?? message.participant ?? message.from ?? ''),\n  received_at: receivedAt, media_url: mediaUrl, mime_type: mimeType, original_filename: filename,\n  correlation_id: correlationId, idempotency_key: correlationId, raw_event_version: 'waha-v2'\n} }];"
       }
     },
     {
@@ -48,12 +48,12 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.4,
       "position": [
-        480,
-        200
+        2860,
+        100
       ],
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ { received: true, accepted: $json.accepted, reason: $json.reason, message_id: $json.message_id } }}",
+        "responseBody": "={{ { received: true, persisted: true, accepted: $json.accepted, reason: $json.reason, message_id: $json.message_id, correlation_id: $json.correlation_id } }}",
         "options": {
           "responseCode": 202
         }
@@ -286,10 +286,20 @@
             "estimated_cost": "={{ Number($json.estimated_cost ?? 0) }}",
             "extracted_json": "={{ $json.extracted_json ?? '' }}",
             "created_at": "={{ $json.created_at ?? '' }}",
-            "updated_at": "={{ $json.updated_at ?? '' }}"
+            "updated_at": "={{ $json.updated_at ?? '' }}",
+            "correlation_id": "={{ $json.correlation_id ?? \"\" }}"
           },
           "matchingColumns": [],
           "schema": [
+            {
+              "id": "correlation_id",
+              "displayName": "correlation_id",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
             {
               "id": "idempotency_key",
               "displayName": "idempotency_key",
@@ -514,7 +524,7 @@
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.3,
       "position": [
-        2860,
+        3100,
         240
       ],
       "parameters": {
@@ -537,7 +547,7 @@
       "type": "n8n-nodes-base.noOp",
       "typeVersion": 1,
       "position": [
-        3100,
+        3340,
         240
       ],
       "parameters": {}
@@ -563,10 +573,27 @@
         -120
       ],
       "parameters": {
-        "content": "## 01 · WAHA → arquivo original\n- monitora apenas grupos explicitamente autorizados;\n- não envia mensagens ao WhatsApp;\n- responde somente ao webhook técnico;\n- deduplica por grupo + messageId;\n- arquiva o original antes da IA;\n- IA roda em subworkflow assíncrono.\n\nAntes de ativar: preencher groupId, pasta do Drive e credenciais WAHA/Google.",
+        "content": "## 01 · WAHA → arquivo original\n- monitora apenas grupos explicitamente autorizados;\n- não envia mensagens ao WhatsApp;\n- persiste o manifesto antes do ACK técnico para documentos aceitos;\n- correlaciona por tenant + grupo + messageId;\n- arquiva o original antes da IA;\n- IA roda em subworkflow assíncrono.\n\nAntes de ativar: preencher groupId, pasta do Drive e credenciais WAHA/Google.",
         "width": 980,
         "height": 300,
         "color": 5
+      }
+    },
+    {
+      "id": "respond-ignored",
+      "name": "Responder evento ignorado",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        940,
+        600
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { received: true, persisted: false, accepted: false, reason: $json.reason, message_id: $json.message_id, correlation_id: $json.correlation_id } }}",
+        "options": {
+          "responseCode": 202
+        }
       }
     }
   ],
@@ -583,17 +610,6 @@
       ]
     },
     "Validar evento WAHA": {
-      "main": [
-        [
-          {
-            "node": "Confirmar recebimento técnico",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Confirmar recebimento técnico": {
       "main": [
         [
           {
@@ -615,7 +631,7 @@
         ],
         [
           {
-            "node": "Evento ignorado sem resposta",
+            "node": "Responder evento ignorado",
             "type": "main",
             "index": 0
           }
@@ -724,7 +740,7 @@
       "main": [
         [
           {
-            "node": "Enfileirar análise documental",
+            "node": "Confirmar recebimento técnico",
             "type": "main",
             "index": 0
           }
@@ -736,6 +752,28 @@
         [
           {
             "node": "Documento arquivado e enfileirado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Responder evento ignorado": {
+      "main": [
+        [
+          {
+            "node": "Evento ignorado sem resposta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Confirmar recebimento técnico": {
+      "main": [
+        [
+          {
+            "node": "Enfileirar análise documental",
             "type": "main",
             "index": 0
           }

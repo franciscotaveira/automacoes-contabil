@@ -1,0 +1,16 @@
+{
+  "entries": [
+    {
+      "correlation_id": "tenant-a:group-a:message-1",
+      "drive_file_id": "drive-file-1",
+      "hash": "sha256-document-1",
+      "manifest_path": "Empresa A/2026/NF-e/10/13/documento-1.pdf"
+    },
+    {
+      "correlation_id": "tenant-a:group-a:message-2",
+      "drive_file_id": "drive-file-2",
+      "hash": "sha256-document-2",
+      "manifest_path": "Empresa A/2026/Boleto/10/13/documento-2.pdf"
+    }
+  ]
+}

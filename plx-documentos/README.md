@@ -23,7 +23,8 @@ Variáveis novas:
 
 O painel expõe `GET /api/metrics` pela autenticação do usuário e um endpoint
 técnico separado em `GET /metrics`. O endpoint técnico exige
-`X-Metrics-Key` e `X-Tenant-ID`; ele falha fechado se
+`X-Metrics-Key` e `X-Tenant-ID`; os dois serviços devolvem somente o escopo
+do tenant solicitado e falham fechado se
 `METRICS_SHARED_KEY` não estiver configurada. O leitor também expõe métricas
 protegidas pela mesma convenção. Use chaves diferentes por serviço em produção.
 

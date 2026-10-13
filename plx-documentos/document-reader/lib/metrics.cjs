@@ -59,6 +59,22 @@ function evaluateAlerts(snapshot, options = {}) {
   return alerts;
 }
 
-const defaultMetrics = createMetrics();
+function createTenantMetrics() {
+  const tenants = new Map();
+  const forTenant = (tenantId) => {
+    const tenant = String(tenantId || '').trim();
+    if (!tenant) throw new Error('metric_tenant_required');
+    if (!tenants.has(tenant)) tenants.set(tenant, createMetrics());
+    return tenants.get(tenant);
+  };
+  return Object.freeze({
+    increment(tenantId, name, amount = 1) { return forTenant(tenantId).increment(name, amount); },
+    snapshot(tenantId) { return forTenant(tenantId).snapshot(); },
+    reset() { tenants.clear(); },
+  });
+}
 
-module.exports = { COUNTERS, createMetrics, defaultMetrics, evaluateAlerts };
+const defaultMetrics = createMetrics();
+const defaultTenantMetrics = createTenantMetrics();
+
+module.exports = { COUNTERS, createMetrics, createTenantMetrics, defaultMetrics, defaultTenantMetrics, evaluateAlerts };

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import metricsModule from '../lib/metrics.js';
 
-const { COUNTERS, createMetrics, evaluateAlerts } = metricsModule;
+const { COUNTERS, createMetrics, createTenantMetrics, evaluateAlerts } = metricsModule;
 
 test('metrics exposes only declared non-negative counters', () => {
   const metrics = createMetrics();
@@ -13,6 +13,15 @@ test('metrics exposes only declared non-negative counters', () => {
   assert.equal(metrics.snapshot().document_extracted_total, 2);
   assert.throws(() => metrics.increment('unknown_total'), /metric_unknown/);
   assert.throws(() => metrics.increment('document_received_total', -1), /metric_increment_invalid/);
+});
+
+test('tenant metrics never mix counters between customers', () => {
+  const metrics = createTenantMetrics();
+  metrics.increment('tenant-a', 'document_received_total', 2);
+  metrics.increment('tenant-b', 'document_received_total');
+  assert.equal(metrics.snapshot('tenant-a').document_received_total, 2);
+  assert.equal(metrics.snapshot('tenant-b').document_received_total, 1);
+  assert.throws(() => metrics.snapshot(''), /metric_tenant_required/);
 });
 
 test('evaluateAlerts reports configured operational thresholds', () => {

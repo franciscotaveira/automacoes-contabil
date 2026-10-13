@@ -213,9 +213,11 @@ test('metrics endpoint fails closed and accepts the configured shared key', asyn
     assert.equal((await fetch(`${base}/metrics`)).status, 503);
     process.env.METRICS_SHARED_KEY = 'fixture-metrics-key';
     assert.equal((await fetch(`${base}/metrics`)).status, 401);
-    const response = await fetch(`${base}/metrics`, { headers: { 'x-metrics-key': 'fixture-metrics-key' } });
+    assert.equal((await fetch(`${base}/metrics`, { headers: { 'x-metrics-key': 'fixture-metrics-key' } })).status, 400);
+    const response = await fetch(`${base}/metrics`, { headers: { 'x-metrics-key': 'fixture-metrics-key', 'x-tenant-id': 'tenant-fixture' } });
     assert.equal(response.status, 200);
     const body = await response.json();
+    assert.equal(body.tenant_id, 'tenant-fixture');
     assert.equal(body.reader_version, 'hybrid-v3.2.0');
     assert.equal(typeof body.metrics.document_extracted_total, 'number');
   } finally {

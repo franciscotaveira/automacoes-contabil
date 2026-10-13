@@ -13,7 +13,7 @@ import metricsModule from './lib/metrics.cjs';
 const execFileAsync = promisify(execFile);
 const { defaultDocStore } = docstoreModule;
 const { createLogger } = loggerModule;
-const { defaultMetrics } = metricsModule;
+const { defaultMetrics, defaultTenantMetrics } = metricsModule;
 const logger = createLogger('document-reader');
 
 export const READER_VERSION = 'hybrid-v3.2.0';
@@ -529,7 +529,10 @@ export async function extractDocument(payload, { docstore = defaultDocStore } = 
       documentRecord = docstore.updateState(correlationId, 'SOURCE_STORED', {
         document_hash: compact(payload.document_hash || payload.sha256) || null,
       });
-      if (!existing) defaultMetrics.increment('document_received_total');
+      if (!existing) {
+        defaultMetrics.increment('document_received_total');
+        if (payload.tenant_id) defaultTenantMetrics.increment(payload.tenant_id, 'document_received_total');
+      }
     } catch (error) {
       logger.warn('docstore_update_failed', {
         correlation_id: correlationId,
@@ -563,6 +566,7 @@ export async function extractDocument(payload, { docstore = defaultDocStore } = 
   const decisionReason = accepted ? 'LOCAL_EXTRACTION_ACCEPTED' : 'LOCAL_EXTRACTION_REQUIRES_REVIEW';
   const enriched = { ...result, confidence, decision_reason: decisionReason };
   defaultMetrics.increment('document_extracted_total');
+  if (payload.tenant_id) defaultTenantMetrics.increment(payload.tenant_id, 'document_extracted_total');
   if (!correlationId) return enriched;
   try {
     documentRecord = docstore.updateState(correlationId, 'EXTRACTED', {
@@ -841,6 +845,7 @@ export async function reinforceDocument(payload, dependencies = {}) {
     const elapsed = Date.now() - startedAt;
     lastReinforcementMs = elapsed;
     defaultMetrics.increment('reinforcement_failures_total');
+    if (payload.tenant_id) defaultTenantMetrics.increment(payload.tenant_id, 'reinforcement_failures_total');
     return withMetadata({
       ...original,
       warnings: unique([...(Array.isArray(original.warnings) ? original.warnings : []), 'AI_REINFORCEMENT_FAILED']),
@@ -902,7 +907,9 @@ export function createServer() {
       const auth = metricsAuthorized(req);
       if (!auth.configured) return json(res, 503, { error: 'metrics_key_not_configured' });
       if (!auth.authorized) return json(res, 401, { error: 'metrics_unauthorized' });
-      return json(res, 200, { reader_version: READER_VERSION, metrics: defaultMetrics.snapshot() });
+      const tenantId = String(req.headers['x-tenant-id'] || '').trim();
+      if (!tenantId) return json(res, 400, { error: 'metrics_tenant_required' });
+      return json(res, 200, { tenant_id: tenantId, reader_version: READER_VERSION, metrics: defaultTenantMetrics.snapshot(tenantId) });
     }
     if (req.method === 'GET' && req.url === '/health') {
       return json(res, 200, {

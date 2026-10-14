@@ -107,6 +107,22 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlsplit(self.path)
         if path.path == '/healthz': return self.reply(200, {'ok': True})
+        if path.path == '/metrics':
+            configured = os.environ.get('METRICS_SHARED_KEY', '').strip()
+            supplied = self.headers.get('X-Metrics-Key', '').strip()
+            tenant = self.headers.get('X-Tenant-ID', '').strip()
+            if not configured or configured == 'CHANGE_ME':
+                return self.reply(503, {'error': 'METRICS_KEY_NOT_CONFIGURED'})
+            if not supplied or not hmac.compare_digest(supplied, configured):
+                return self.reply(401, {'error': 'UNAUTHORIZED'})
+            if not tenant:
+                return self.reply(400, {'error': 'TENANT_REQUIRED'})
+            try:
+                snapshot = json.loads((DATA / 'snapshot.json').read_text())
+            except Exception:
+                return self.reply(503, {'error': 'SNAPSHOT_UNAVAILABLE'})
+            documents = [d for d in snapshot.get('documents', []) if d.get('tenant_id') == tenant]
+            return self.reply(200, {'tenant_id': tenant, 'metrics': metrics_snapshot(documents)})
         try:
             users = json.loads(AUTH.read_text())
         except Exception:
@@ -129,7 +145,7 @@ class Handler(BaseHTTPRequestHandler):
         if path.path in static:
             name, mime = static[path.path]
             return self.reply(200, (ROOT / 'static' / name).read_bytes(), mime)
-        if path.path != '/metrics' and not path.path.startswith('/api/'):
+        if not path.path.startswith('/api/'):
             return self.reply(404, {'error': 'NOT_FOUND'})
         try:
             snapshot = json.loads((DATA / 'snapshot.json').read_text())
@@ -146,7 +162,7 @@ class Handler(BaseHTTPRequestHandler):
             docs = [d for d in docs if d.get('tenant_id') == requested_tenant]
         # The legacy source is exclusively PLX. An unknown tenant receives no source-level data.
         plx = 'plx' in user.get('tenants', [])
-        if path.path in {'/metrics', '/api/metrics'}:
+        if path.path == '/api/metrics':
             return self.reply(200, {**metadata, 'metrics': metrics_snapshot(docs)})
         if path.path == '/api/overview':
             stages, attention = operational_summary(docs, snapshot['executions'] if plx else [])

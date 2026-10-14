@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import os
 import sqlite3
 import tempfile
 import threading
@@ -54,6 +55,8 @@ class PanelTests(unittest.TestCase):
                 except urllib.error.HTTPError as e:
                     with e:return e.code,json.load(e)
             try:
+                previous_metrics_key = os.environ.get('METRICS_SHARED_KEY')
+                os.environ['METRICS_SHARED_KEY'] = 'fixture-metrics-key'
                 self.assertEqual(request('/api/overview')[0],401)
                 code,res=request('/api/overview','a');self.assertEqual(code,200);self.assertTrue(res['stale']);self.assertEqual(res['total'],1)
                 self.assertEqual([stage['id'] for stage in res['pipeline']],['ingress','queue','worker','drive','notify'])
@@ -62,14 +65,18 @@ class PanelTests(unittest.TestCase):
                 _,res=request('/api/overview','b');self.assertEqual(res['total'],0);self.assertEqual(res['executions'],[]);self.assertEqual(res['session'],{})
                 self.assertEqual(request('/api/documents/1','b')[0],404)
                 code,res=request('/api/metrics','a');self.assertEqual(code,200);self.assertEqual(res['metrics']['document_received_total'],1);self.assertEqual(res['metrics']['document_archived_total'],1)
-                code,res=request('/metrics','a');self.assertEqual(code,200);self.assertEqual(res['metrics']['reinforcement_failures_total'],0)
-                self.assertEqual(request('/metrics')[0],401)
+                code,res=request('/metrics','a');self.assertEqual(code,401)
+                req=urllib.request.Request('http://127.0.0.1:'+str(http.server_port)+'/metrics',headers={'X-Metrics-Key':'fixture-metrics-key','X-Tenant-ID':'plx'})
+                with urllib.request.urlopen(req) as metrics_response: metrics=json.load(metrics_response)
+                self.assertEqual(metrics['tenant_id'],'plx');self.assertEqual(metrics['metrics']['reinforcement_failures_total'],0)
                 self.assertEqual(request('/api/documents?tenant=plx','b')[1]['total'],0)
                 self.assertEqual(request('/api/documents?offset=bad','a')[0],400)
                 self.assertEqual(request('/api/documents/1','a',method='POST')[0],405)
                 (server.DATA/'snapshot.json').unlink()
                 self.assertEqual(request('/api/overview','a')[0],503)
             finally:
+                if previous_metrics_key is None: os.environ.pop('METRICS_SHARED_KEY',None)
+                else: os.environ['METRICS_SHARED_KEY']=previous_metrics_key
                 http.shutdown();http.server_close();thread.join()
 
 

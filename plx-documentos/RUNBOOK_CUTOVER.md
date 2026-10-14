@@ -10,6 +10,8 @@ para trocar o consumidor WAHA ou ativar o modo estrito.
 - [ ] Revisar `deploy/migrations/003_add_documents_state.sql` e aplicá-la manualmente apenas na janela aprovada.
 - [ ] Preencher tenant, operação, grupo, pasta do Drive e policy version com valores do cliente.
 - [ ] Manter `FEATURE_FLAG_STRICT_MODE=false` durante o smoke inicial.
+- [ ] Selecionar um único tenant canário e registrar responsável, janela e rollback.
+- [ ] Validar `npm run security:scan` e permissões `0600` do arquivo de ambiente.
 
 ## 2. Provar persistência antes do ACK
 
@@ -43,8 +45,17 @@ Qualquer código `2` bloqueia o cutover e exige correção ou revisão humana.
 - [ ] Habilitar o webhook somente após os gates anteriores.
 - [ ] Enviar um documento canário sem dados pessoais reais.
 - [ ] Verificar fila, manifesto, Drive, painel, reconciliador e confirmação pelo mesmo `correlation_id`.
+- [ ] Manter o canário isolado por 48 a 72 horas antes de adicionar outro grupo.
+- [ ] Conferir alertas de reforço, taxa de revisão e divergências pelo menos uma vez por turno.
 
-## 6. Rollback
+## 6. Fila de revisão
+
+- [ ] Confirmar que somente `REVIEW_REQUIRED` chega ao `ops-review`.
+- [ ] Testar assumir e resolver um item sem cruzar `tenant_id`.
+- [ ] Definir SLA e responsável por documentos inconclusivos antes do uso real.
+- [ ] Não usar a decisão humana para sobrescrever o original ou apagar evidências.
+
+## 7. Rollback
 
 1. Desabilitar o webhook novo ou restaurar a rota anterior.
 2. Manter os registros já persistidos; não apagar documentos durante rollback.

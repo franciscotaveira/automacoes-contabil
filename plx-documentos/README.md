@@ -21,9 +21,30 @@ Variáveis novas:
 - `MAX_BODY_BYTES=26214400`: limite do corpo recebido pelo leitor;
 - `UPSTREAM_TIMEOUT_MS=180000`, `MAX_PDF_PAGES=20` e `MAX_PDF_IMAGE_DIMENSION=1800` preservam os limites operacionais existentes.
 
-O painel expõe os contadores operacionais autenticados em `GET /metrics`
-(alias compatível: `GET /api/metrics`). Os valores são filtrados pelo escopo de
-tenants do usuário autenticado.
+O painel expõe `GET /api/metrics` pela autenticação do usuário e um endpoint
+técnico separado em `GET /metrics`. O endpoint técnico exige
+`X-Metrics-Key` e `X-Tenant-ID`; os dois serviços devolvem somente o escopo
+do tenant solicitado e falham fechado se
+`METRICS_SHARED_KEY` não estiver configurada. O leitor também expõe métricas
+protegidas pela mesma convenção. Use chaves diferentes por serviço em produção.
+
+## Micro-soluções reutilizáveis
+
+- `packs/starter-waha-capture`: ingresso WAHA idempotente e persistência antes do ACK;
+- `packs/extract-route`: leitura híbrida, política e roteamento para Drive ou ERP;
+- `packs/exceptions-review`: fila humana isolada por tenant para casos inconclusivos;
+- `workflows/document-waha-ingest-v2.json`: template importável de captura;
+- `workflows/document-daily-close-v2.json`: fechamento com CSV, Sheets e resumo opcional;
+- `integrations/erp`: contratos opt-in para Protheus e Conta Azul;
+- `installer`: bootstrap conservador e smoke do leitor;
+- `tools/mask-logs.js` e `tools/scan-secrets.js`: redução de PII e barreira básica contra segredos.
+
+Além das variáveis anteriores, configure conforme o módulo usado:
+
+- `METRICS_SHARED_KEY`: autenticação dos endpoints técnicos de métricas;
+- `REVIEW_SHARED_KEY` e `REVIEW_DB_PATH`: fila de revisão;
+- `DOCUMENT_READER_URL` e `POLICY_RESOLVER_URL`: destinos internos dos templates;
+- `PROTHEUS_*` ou `CONTAAZUL_*`: somente quando o adaptador correspondente for habilitado.
 
 Testes e validações locais:
 
@@ -31,8 +52,10 @@ Testes e validações locais:
 npm ci
 npm run lint
 npm run test:node
+npm run security:scan
 cd plx-documentos/ingress-queue && python -m unittest -v test_queue_service.py
 cd ../operations-panel && python -m unittest -v test_panel.py
+cd ../ops-review && python -m unittest -v test_app.py
 docker build --no-cache -t plx-document-reader:test plx-documentos/document-reader
 ```
 
@@ -47,6 +70,8 @@ node plx-documentos/reconciler/reconcile.js \
 
 O reconciliador termina com código `2` quando encontra qualquer divergência.
 Consulte [RUNBOOK_CUTOVER.md](RUNBOOK_CUTOVER.md) antes de habilitar um webhook.
+Para preparar uma instalação sem iniciar serviços, execute `./scripts/bootstrap.sh`.
+O script só sobe a stack quando `START_STACK=true` e nunca ativa workflows.
 
 > **Validação comercial mais recente (10/10/2026):** [VALIDACAO-COMERCIAL-PLX-2026-10-10.md](evidence/VALIDACAO-COMERCIAL-PLX-2026-10-10.md). O sistema está apto para piloto comercial assistido, com dois gates restantes para operação autônoma.
 >

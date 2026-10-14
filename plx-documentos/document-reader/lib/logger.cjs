@@ -21,4 +21,8 @@ function createLogger(moduleName) {
   };
 }
 
-module.exports = { createLogger, write };
+function logger({ module: moduleName = 'application', level = 'info', message, event, meta = {} } = {}) {
+  return write(level, moduleName, message || event || 'log', meta);
+}
+
+module.exports = { createLogger, logger, write };

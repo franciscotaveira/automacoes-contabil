@@ -1,0 +1,10 @@
+{
+  "entries": [
+    {
+      "correlation_id": "tenant-fixture:group-fixture:message-001",
+      "drive_id": "drive-file-1",
+      "document_hash": "sha256-intentionally-different",
+      "manifest_path": "Empresa Exemplo/2026/NF-e/10/13/nota-001.xml"
+    }
+  ]
+}

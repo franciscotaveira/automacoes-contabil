@@ -3,6 +3,8 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { logger } = require('../lib/logger.js');
+const { defaultMetrics } = require('../lib/metrics.js');
 
 function asEntries(value) {
   if (Array.isArray(value)) return value;
@@ -60,8 +62,9 @@ function parseArgs(argv) {
   const args = {};
   for (let index = 0; index < argv.length; index += 1) {
     const key = argv[index];
-    if (!['--manifest', '--drive-sim', '--out'].includes(key)) continue;
-    args[key.slice(2)] = argv[index + 1];
+    if (!['--manifest', '--drive-sim', '--driveSim', '--out'].includes(key)) continue;
+    const normalizedKey = key === '--driveSim' ? 'drive-sim' : key.slice(2);
+    args[normalizedKey] = argv[index + 1];
     index += 1;
   }
   if (!args.manifest || !args['drive-sim'] || !args.out) throw new Error('usage: --manifest FILE --drive-sim FILE --out FILE');
@@ -74,6 +77,12 @@ function runCli(argv = process.argv.slice(2)) {
   const driveSimulation = JSON.parse(fs.readFileSync(path.resolve(args['drive-sim']), 'utf8'));
   const result = reconcile(manifest, driveSimulation);
   fs.writeFileSync(path.resolve(args.out), `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
+  defaultMetrics.increment('reconciliation_discrepancies_total', result.discrepancies_total);
+  logger({ module: 'reconciler', level: result.ok ? 'info' : 'warn', message: 'reconciliation_completed', meta: {
+    checked_total: result.checked_total,
+    discrepancies_total: result.discrepancies_total,
+    output_path: path.resolve(args.out),
+  } });
   return result.ok ? 0 : 2;
 }
 
@@ -81,7 +90,7 @@ if (require.main === module) {
   try {
     process.exitCode = runCli();
   } catch (error) {
-    console.error(JSON.stringify({ level: 'error', module: 'reconciler', error: String(error?.message || 'reconciliation_failed') }));
+    logger({ module: 'reconciler', level: 'error', message: 'reconciliation_failed', meta: { error: String(error?.message || 'reconciliation_failed') } });
     process.exitCode = 1;
   }
 }

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   applyDocumentReviewPolicy,
+  createServer,
   extractDocument,
   extractDeterministicSignals,
   fiscalDocumentTypeFromAccessKey,
@@ -116,7 +117,7 @@ test('extractDocument preserves compatibility and exposes correlation metadata w
   const store = createInMemoryDocStore();
   const correlated = await extractDocument({ ...base, correlation_id: 'tenant:group:message', tenant_id: 'tenant-a' }, { docstore: store });
   assert.equal(correlated.metadata.correlation_id, 'tenant:group:message');
-  assert.equal(correlated.metadata.document_state, 'SOURCE_STORED');
+  assert.equal(correlated.metadata.document_state, 'EXTRACTED');
   assert.equal(store.getDocument('tenant:group:message').tenant_id, 'tenant-a');
   assert.equal(correlated.decision_reason, 'LOCAL_EXTRACTION_ACCEPTED');
 });
@@ -153,6 +154,9 @@ test('reinforceDocument accepts a high-confidence governed result', async () => 
   assert.equal(result.reinforcement_status, 'RESOLVED');
   assert.equal(result.decision_reason, 'REINFORCEMENT_ACCEPTED');
   assert.equal(result.metadata.correlation_id, 'corr-high');
+  assert.equal(result.metadata.document_state, 'CLASSIFIED');
+  assert.equal(result.metadata.reinforcement_accepted, true);
+  assert.ok(result.metadata.evidence_used.includes('NOTA FISCAL'));
 });
 
 test('reinforceDocument sends a low-confidence result to human review', async () => {
@@ -197,4 +201,28 @@ test('parseGuidedResponse returns a specific error for invalid model JSON', () =
     () => parseGuidedResponse({ id: 'request-invalid', choices: [{ message: { content: 'not-json' } }] }),
     /reinforcement_model_invalid_json/,
   );
+});
+
+test('metrics endpoint fails closed and accepts the configured shared key', async () => {
+  const previous = process.env.METRICS_SHARED_KEY;
+  const server = createServer();
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    delete process.env.METRICS_SHARED_KEY;
+    assert.equal((await fetch(`${base}/metrics`)).status, 503);
+    process.env.METRICS_SHARED_KEY = 'fixture-metrics-key';
+    assert.equal((await fetch(`${base}/metrics`)).status, 401);
+    assert.equal((await fetch(`${base}/metrics`, { headers: { 'x-metrics-key': 'fixture-metrics-key' } })).status, 400);
+    const response = await fetch(`${base}/metrics`, { headers: { 'x-metrics-key': 'fixture-metrics-key', 'x-tenant-id': 'tenant-fixture' } });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.tenant_id, 'tenant-fixture');
+    assert.equal(body.reader_version, 'hybrid-v3.2.0');
+    assert.equal(typeof body.metrics.document_extracted_total, 'number');
+  } finally {
+    if (previous === undefined) delete process.env.METRICS_SHARED_KEY;
+    else process.env.METRICS_SHARED_KEY = previous;
+    await new Promise((resolve) => server.close(resolve));
+  }
 });

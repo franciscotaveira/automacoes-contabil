@@ -1,0 +1,9 @@
+{
+  "files": [
+    {
+      "drive_id": "drive-fixture-1",
+      "hash": "sha256-fixture-document-1",
+      "name": "NF-12345.xml"
+    }
+  ]
+}

@@ -23,6 +23,25 @@ test('reconcile identifies missing files and hash mismatches', () => {
   assert.deepEqual(result.discrepancies.map((item) => item.status), ['HASH_MISMATCH', 'DRIVE_FILE_MISSING']);
 });
 
+test('CLI accepts the documented driveSim compatibility flag', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'plx-reconcile-'));
+  const output = path.join(temp, 'result.json');
+  try {
+    const child = spawnSync(process.execPath, [
+      path.join(__dirname, 'reconcile.js'),
+      '--manifest', path.join(__dirname, 'fixtures', 'sample-manifest-mismatch.json'),
+      '--driveSim', path.join(__dirname, 'fixtures', 'sample-drive.json'),
+      '--out', output,
+    ], { encoding: 'utf8' });
+    assert.equal(child.status, 2);
+    const report = JSON.parse(fs.readFileSync(output, 'utf8'));
+    assert.equal(report.discrepancies_total, 1);
+    assert.equal(report.discrepancies[0].status, 'HASH_MISMATCH');
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test('CLI writes the report and exits 2 when inconsistencies exist', () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'plx-reconcile-'));
   const output = path.join(temp, 'result.json');

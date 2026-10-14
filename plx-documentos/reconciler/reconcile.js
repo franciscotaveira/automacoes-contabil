@@ -62,8 +62,9 @@ function parseArgs(argv) {
   const args = {};
   for (let index = 0; index < argv.length; index += 1) {
     const key = argv[index];
-    if (!['--manifest', '--drive-sim', '--out'].includes(key)) continue;
-    args[key.slice(2)] = argv[index + 1];
+    if (!['--manifest', '--drive-sim', '--driveSim', '--out'].includes(key)) continue;
+    const normalizedKey = key === '--driveSim' ? 'drive-sim' : key.slice(2);
+    args[normalizedKey] = argv[index + 1];
     index += 1;
   }
   if (!args.manifest || !args['drive-sim'] || !args.out) throw new Error('usage: --manifest FILE --drive-sim FILE --out FILE');
